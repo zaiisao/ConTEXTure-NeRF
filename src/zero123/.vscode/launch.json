@@ -1,0 +1,29 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ControlNet zero123 train",
+            "type": "python",
+            "request": "launch",
+            "program": "/root/zero123/ControlNet/tutorial_train_zero123.py",
+            "cwd": "/root/zero123/ControlNet",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "ControlNet zero123 add control",
+            "type": "python",
+            "request": "launch",
+            "program": "/root/zero123/ControlNet/tool_add_control_zero123.py",
+            "cwd": "/root/zero123/ControlNet",
+            "args": [
+                "./models/zero123-xl.ckpt", "./models/control-zero123-xl.ckpt"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
