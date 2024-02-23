@@ -7,3 +7,6 @@
 data/*
 logs/*
 .idea
+*.ckpt
+experiments/
+cache/
