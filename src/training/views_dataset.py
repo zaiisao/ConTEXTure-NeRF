@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import math
 
 from src.configs.train_config import RenderConfig
 from src.utils import get_view_direction
@@ -135,11 +136,14 @@ class MultiviewDataset:
                                                   angle_overhead=self.cfg.overhead_range,
                                                   angle_front=self.cfg.front_range)
 
+        base_theta = math.radians(self.cfg.base_theta)
+
         data = {
             'dir': dirs,
             'theta': thetas,
             'phi': phis,
-            'radius': radius
+            'radius': radius,
+            'base_theta': base_theta
         }
 
         return data
@@ -174,11 +178,14 @@ class ViewsDataset:
                                                       angle_overhead=self.cfg.overhead_range,
                                                       angle_front=self.cfg.front_range)
 
+        base_theta = math.radians(self.cfg.base_theta)
+
         data = {
             'dir': dirs,
             'theta': thetas,
             'phi': phis,
-            'radius': radius
+            'radius': radius,
+            'base_theta': base_theta
         }
 
         return data

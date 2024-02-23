@@ -15,12 +15,19 @@ from tqdm.auto import tqdm
 import cv2
 import numpy as np
 from PIL import Image
+import math
+from einops import rearrange
 
+from omegaconf import OmegaConf
+from .zero123.zero123.ldm.util import instantiate_from_config
 
 class StableDiffusion(nn.Module):
     def __init__(self, device, model_name='CompVis/stable-diffusion-v1-4', concept_name=None, concept_path=None,
                  latent_mode=True,  min_timestep=0.02, max_timestep=0.98, no_noise=False,
-                 use_inpaint=False):
+                 use_inpaint=False, second_model_type='control_zero123'):
+
+        assert second_model_type in [None, 'zero123', 'control_zero123']
+
         super().__init__()
 
         try:
@@ -39,6 +46,7 @@ class StableDiffusion(nn.Module):
         self.min_step = int(self.num_train_timesteps * min_timestep)
         self.max_step = int(self.num_train_timesteps * max_timestep)
         self.use_inpaint = use_inpaint
+        self.second_model_type = second_model_type
 
         logger.info(f'loading stable diffusion with {model_name}...')
 
@@ -61,6 +69,12 @@ class StableDiffusion(nn.Module):
                                                                      subfolder="unet", use_auth_token=self.token).to(
                 self.device)
 
+        if self.second_model_type == "control_zero123":
+            self.second_model = self.init_zero123(control=True)
+        elif self.second_model_type == "zero123":
+            self.second_model = self.init_zero123(control=False)
+        elif self.second_model_type is not None:
+            raise NotImplementedError
 
         # 4. Create a scheduler for inference
         self.scheduler = PNDMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear",
@@ -72,6 +86,72 @@ class StableDiffusion(nn.Module):
         if concept_name is not None:
             self.load_concept(concept_name, concept_path)
         logger.info(f'\t successfully loaded stable diffusion!')
+
+    def init_zero123(self, control=True):
+        if control == "control":
+            config = OmegaConf.load("./src/zero123/ControlNet/models/cldm_zero123.yaml")
+        else:
+            config = OmegaConf.load("./src/zero123/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml")
+
+        pl_sd = torch.load("./src/zero123/control_zero123.ckpt", map_location='cpu')
+        sd = pl_sd['state_dict']
+
+        model = instantiate_from_config(config.model).to(self.device)
+        model.load_state_dict(sd, strict=False)
+        model.eval()
+
+        return model
+
+    @torch.no_grad()
+    def get_zero123_inputs(
+        self,
+        cond_image,
+        depth_map,
+        x, y, z=1.0,
+        n_samples=1,
+        scale=1.0,
+        guess_mode=False,
+        use_control=True
+    ):
+        # JA: The following code is from gradio_new_depth_texture.py
+
+        c = self.second_model.get_learned_conditioning(cond_image).tile(n_samples, 1, 1)
+
+        # T = torch.tensor([math.radians(x), math.sin(
+        #     math.radians(y)), math.cos(math.radians(y)), z]) # JA: In the TEXTure code, x and y are in radians already
+        T = torch.tensor([x, math.sin(y), math.cos(y), z])
+
+        T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device)
+        c = torch.cat([c, T], dim=-1)
+        c = self.second_model.cc_projection(c)
+        cond = {}
+        cond['c_crossattn'] = [c]
+        cond['c_concat'] = [self.second_model.encode_first_stage((cond_image.to(c.device))).mode().detach().repeat(n_samples, 1, 1, 1)]
+        
+        if use_control:
+            depth_min = torch.amin(depth_map, dim=[0, 1, 2], keepdim=True)
+            depth_max = torch.amax(depth_map, dim=[0, 1, 2], keepdim=True)
+
+            control = 2. * (depth_map - depth_min) / (depth_max - depth_min) - 1.
+            control = torch.stack([control for _ in range(n_samples)], dim=0)
+            # control = rearrange(control, 'b h w c -> b c h w').clone()
+            control = control.repeat_interleave(3, dim=1)
+
+            cond['c_control'] = [control]
+
+        if scale != 1.0:
+            h, w = depth_map.shape[-2], depth_map.shape[-1]
+
+            uc = {}
+            uc['c_concat'] = [torch.zeros(n_samples, 4, h // 8, w // 8).to(c.device)]
+            uc['c_crossattn'] = [torch.zeros_like(c).to(c.device)]
+
+            if use_control:
+                uc['c_control'] = None if guess_mode else [control]
+        else:
+            uc = None
+
+        return cond, uc
 
     def load_concept(self, concept_name, concept_path=None):
         # NOTE: No need for both name and path, they are the same!
@@ -167,58 +247,84 @@ class StableDiffusion(nn.Module):
             target_latents = sample(prev_latents, depth_mask, step=step)
         return target_latents
 
-    def img2img_step(self, text_embeddings, inputs, depth_mask, guidance_scale=100, strength=0.5,
+    # JA: I renamed  "depth_mask" to "original_depth_mask"
+    # The reason for this is because the existing code reduces the size of the depth mask, overwriting
+    # the original depth map. However, the Control0123 model has been trained on the full-size depth mask.
+    # inputs = Q_t = cropped_rgb_render
+    def img2img_step(self, text_embeddings, inputs, original_depth_mask, guidance_scale=100, strength=0.5,
                      num_inference_steps=50, update_mask=None, latent_mode=False, check_mask=None,
-                     fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False):
+                     fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False, view_dir=None,
+                     front_image=None, phi=None, theta=None):
         # input is 1 3 512 512
         # depth_mask is 1 1 512 512
-        # text_embeddings is 2 512
+        # text_embeddings is 2 512 # JA: text_embeddings contains the single embedding for one of the six view prompts
+
+        # JA: We need to replace text_embeddings by the embedding vector of the cond image + the relative camera pose
+        # We also set the self.unet 
+
         intermediate_results = []
 
         def sample(latents, depth_mask, strength, num_inference_steps, update_mask=None, check_mask=None,
                    masked_latents=None):
             self.scheduler.set_timesteps(num_inference_steps)
             noise = None
+            # if self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
+            #     latents = torch.randn_like(latents, device=latents.device)
+            #     update_mask = None
+            #     check_mask = None
+
             if latents is None:
                 # Last chanel is reserved for depth
                 latents = torch.randn(
-                    (
+                    ( # JA: text_embeddings is a global variable of the sample inner function
                         text_embeddings.shape[0] // 2, self.unet.in_channels - 1, depth_mask.shape[2],
                         depth_mask.shape[3]),
                     device=self.device)
                 timesteps = self.scheduler.timesteps
-            else:
+            else: # JA: latents is the latent version of Q_t without noise
                 # Strength has meaning only when latents are given
                 timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength)
-                latent_timestep = timesteps[:1]
+                latent_timestep = timesteps[:1] # JA: The first timestep; in our case, tensor([981])
                 if fixed_seed is not None:
                     seed_everything(fixed_seed)
                 noise = torch.randn_like(latents)
                 if update_mask is not None:
                     # NOTE: I think we might want to use same noise?
-                    gt_latents = latents
+                    gt_latents = latents # JA: ground truth will be used to calculate the noised truth later. gt_latents refers to Q_t in latent space without noise and has a shape of (64, 64)
                     latents = torch.randn(
                         (text_embeddings.shape[0] // 2, self.unet.in_channels - 1, depth_mask.shape[2],
                          depth_mask.shape[3]),
                         device=self.device)
                 else:
                     latents = self.scheduler.add_noise(latents, noise, latent_timestep)
+            # JA: In our experiment, the latents is a random tensor at this point
 
-            depth_mask = torch.cat([depth_mask] * 2)
+            depth_mask = torch.cat([depth_mask] * 2) # JA: depth_mask is D_t (in latent space 64x64)
+
+            # print(f"zero123, azimuth: {phi}, overhead: {theta}")
 
             with torch.autocast('cuda'):
-                for i, t in tqdm(enumerate(timesteps)):
+                for i, t in tqdm(enumerate(timesteps)): # JA: denoising iteration loop of the sample function
                     is_inpaint_range = self.use_inpaint and (10 < i < 20)
                     mask_constraints_iters = True  # i < 20
                     is_inpaint_iter = is_inpaint_range  # and i %2 == 1
 
                     if not is_inpaint_range and mask_constraints_iters:
                         if update_mask is not None:
-                            noised_truth = self.scheduler.add_noise(gt_latents, noise, t)
+                            noised_truth = self.scheduler.add_noise(gt_latents, noise, t) # JA: noised_truth is z_Q_t and gt_latents is z_Q_0 (00XX_cropped_input.jpg)
+                            # JA: update_mask and check_mask are used in both the inpainting and depth pipelines
+                            # This implements formula 2 of the paper.
                             if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
                                 curr_mask = check_mask
                             else:
-                                curr_mask = update_mask
+                                curr_mask = update_mask # JA: update_mask means "refine" in the paper
+
+                            # JA: This corresponds to the formula 1 of the equation paper.
+                            # z_i ← z_i * m_blended + z_Q_t * (1 − m_blended)
+                            # m_blended is curr_mask
+                            # On the right side, the latents is the random tensor and the noised_truth is the ground
+                            # truth with some noise. latents now refers to the image being denoised and plays the role of
+                            # x in apply_model.
                             latents = latents * curr_mask + noised_truth * (1 - curr_mask)
 
                     # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
@@ -228,13 +334,40 @@ class StableDiffusion(nn.Module):
 
                     if is_inpaint_iter:
                         latent_mask = torch.cat([update_mask] * 2)
-                        latent_image = torch.cat([masked_latents] * 2)
+                        latent_image = torch.cat([masked_latents] * 2) # JA: latent_image is the masked latent image
                         latent_model_input_inpaint = torch.cat([latent_model_input, latent_mask, latent_image], dim=1)
                         with torch.no_grad():
                             noise_pred_inpaint = \
                                 self.inpaint_unet(latent_model_input_inpaint, t, encoder_hidden_states=text_embeddings)[
-                                    'sample']
+                                    'sample']   # JA: When we use Zero123, the text embeddings should be replaced with the
+                                                # embeddings of the cond image plus the relative camera pose
                             noise_pred = noise_pred_inpaint
+
+                    # JA: The following block was added to handle the control image for zero123
+                    elif self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
+                        use_control = self.second_model_type == "control_zero123"
+
+                        cond, uc = self.get_zero123_inputs(
+                            F.interpolate(front_image, size=(512, 512)),
+                            F.interpolate(original_depth_mask, size=(512, 512))[0],
+                            phi, theta,
+                            scale=guidance_scale,
+                            use_control=use_control
+                        )
+
+                        t = t[None].to(self.device)
+                        with torch.no_grad():
+                            # JA: Note that latents -- not latent_model_input -- goes into each
+                            # apply_model call, because latent_model_input is created on the
+                            # assumption that cond and uncond will be sampled at the same time
+
+                            if uc is None or guidance_scale == 1.:
+                                model_t = model_uncond = self.second_model.apply_model(latents, t, cond)
+                            else:
+                                model_t = self.second_model.apply_model(latents, t, cond)
+                                model_uncond = self.second_model.apply_model(latents, t, uc)
+
+                            noise_pred = torch.cat((model_uncond, model_t), dim=0)
                     else:
                         latent_model_input_depth = torch.cat([latent_model_input, depth_mask], dim=1)
                         # predict the noise residual
@@ -261,19 +394,30 @@ class StableDiffusion(nn.Module):
                         intermediate_results.append(image)
                     latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
 
-            return latents
+                    import torchvision
+                    torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/sample_image_{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}.png")
+                    torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/depth_mask_{phi}_{theta}.png")
 
-        depth_mask = F.interpolate(depth_mask, size=(64, 64), mode='bicubic',
-                                   align_corners=False)
+            return latents
+        # JA: end of sample function
+
+        depth_mask = F.interpolate(original_depth_mask, size=(64, 64), mode='bicubic',
+                                   align_corners=False) # JA: original_depth_mask is D_t (in pixel space) and has a shape of (827, 827) and is a nonzero region of the depth image
         masked_latents = None
         if inputs is None:
             latents = None
         elif latent_mode:
             latents = inputs
         else:
+            # JA: inputs is the "cropped_input" which represents the non-zero region of the rendered image of the current texture atlas
             pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear',
-                                         align_corners=False)
-            latents = self.encode_imgs(pred_rgb_512)
+                                         align_corners=False) # JA: Shape of inputs is (827, 827)
+
+            # if self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
+            #     latents = None#torch.randn((64, 64), device=self.device)
+            # else:
+            latents = self.encode_imgs(pred_rgb_512) # JA: Convert the rgb_render_output to the latent space of shape 64x64
+
             if self.use_inpaint:
                 update_mask_512 = F.interpolate(update_mask, (512, 512))
                 masked_inputs = pred_rgb_512 * (update_mask_512 < 0.5) + 0.5 * (update_mask_512 >= 0.5)
@@ -291,9 +435,13 @@ class StableDiffusion(nn.Module):
         t = (self.min_step + self.max_step) // 2
 
         with torch.no_grad():
+            # JA: target_latents is the denoised image in the latent space for the given text_embeddings
             target_latents = sample(latents, depth_mask, strength=strength, num_inference_steps=num_inference_steps,
                                     update_mask=update_mask, check_mask=check_mask, masked_latents=masked_latents)
-            target_rgb = self.decode_latents(target_latents)
+            target_rgb = self.decode_latents(target_latents)    # JA: Convert into the pixel space. target_rgb is the image corresponding to a specific view prompt
+                                                                # In our case, we need to obtain the image corresponding to a specific relative camera pose which
+                                                                # is obtained from the front view image. In our case target_rgb is the image created from zero123
+                                                                # by means of the relative camera pose.
 
         if latent_mode:
             return target_rgb, target_latents

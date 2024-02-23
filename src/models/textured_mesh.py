@@ -125,7 +125,9 @@ class TexturedMeshModel(nn.Module):
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8]
         self.background_sphere_colors, self.texture_img = self.init_paint()
-        self.meta_texture_img = nn.Parameter(torch.zeros_like(self.texture_img))
+        self.meta_texture_img = nn.Parameter(torch.zeros_like(self.texture_img)) # JA: self.texture_img is the texture atlas
+                                # define self.meta_texture_img variable to be the parameter of the neural network whose init
+                                # value is set to a zero tensor
         if self.opt.reference_texture:
             base_texture = torch.Tensor(np.array(Image.open(self.opt.reference_texture).resize(
                 (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0

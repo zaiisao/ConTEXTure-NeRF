@@ -1,4 +1,10 @@
 import pyrallis
+import sys
+import os
+
+print(os.getcwd())
+sys.path.append("./src/zero123/zero123")
+sys.path.append("./src/zero123/ControlNet")
 
 from src.configs.train_config import TrainConfig
 from src.training.trainer import TEXTure

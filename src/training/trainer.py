@@ -50,6 +50,8 @@ class TEXTure:
             self.device).permute(2, 0,
                                  1) / 255.0
 
+        self.zero123_front_input = None
+
         logger.info(f'Successfully initialized {self.cfg.log.exp_name}')
 
     def init_mesh_model(self) -> nn.Module:
@@ -68,6 +70,8 @@ class TEXTure:
         return model
 
     def init_diffusion(self) -> Any:
+        # JA: The StableDiffusion class composes a pipeline by using individual components such as VAE encoder,
+        # CLIP encoder, and UNet
         diffusion_model = StableDiffusion(self.device, model_name=self.cfg.guide.diffusion_name,
                                           concept_name=self.cfg.guide.concept_name,
                                           concept_path=self.cfg.guide.concept_path,
@@ -96,7 +100,7 @@ class TEXTure:
                 negative_prompt = None
                 logger.info(negative_prompt)
                 text_z.append(self.diffusion.get_text_embeds([text], negative_prompt=negative_prompt))
-        return text_z, text_string
+        return text_z, text_string # JA: text_z contains the embedded vectors of the six view prompts
 
     def init_dataloaders(self) -> Dict[str, DataLoader]:
         init_train_dataloader = MultiviewDataset(self.cfg.render, device=self.device).dataloader()
@@ -125,12 +129,15 @@ class TEXTure:
         pbar = tqdm(total=len(self.dataloaders['train']), initial=self.paint_step,
                     bar_format='{desc}: {percentage:3.0f}% painting step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
 
+        # JA: The following loop computes the texture atlas for the given mesh using ten render images. In other words,
+        # it is the inverse rendering process. Each of the ten views is one of the six view images.
         for data in self.dataloaders['train']:
             self.paint_step += 1
             pbar.update(1)
-            self.paint_viewpoint(data)
-            self.evaluate(self.dataloaders['val'], self.eval_renders_path)
-            self.mesh_model.train()
+            self.paint_viewpoint(data) # JA: paint_viewpoint computes the part of the texture atlas by using a specific view image
+            self.evaluate(self.dataloaders['val'], self.eval_renders_path)  # JA: This is the validation step for the current
+                                                                            # training step
+            self.mesh_model.train() # JA: Set the model to train mode because the self.evaluate sets the model to eval mode.
 
         self.mesh_model.change_default_to_median()
         logger.info('Finished Painting ^_^')
@@ -191,14 +198,16 @@ class TEXTure:
 
     def paint_viewpoint(self, data: Dict[str, Any]):
         logger.info(f'--- Painting step #{self.paint_step} ---')
-        theta, phi, radius = data['theta'], data['phi'], data['radius']
+        theta, phi, radius = data['theta'], data['phi'], data['radius'] # JA: data represents a viewpoint which is stored in the dataset
         # If offset of phi was set from code
         phi = phi - np.deg2rad(self.cfg.render.front_offset)
         phi = float(phi + 2 * np.pi if phi < 0 else phi)
         logger.info(f'Painting from theta: {theta}, phi: {phi}, radius: {radius}')
 
         # Set background image
-        if self.cfg.guide.use_background_color:
+        if self.view_dirs[data['dir']] != "front":
+            background = torch.Tensor([1, 1, 1]).to(self.device)
+        elif self.cfg.guide.use_background_color:
             background = torch.Tensor([0, 0.8, 0]).to(self.device)
         else:
             background = F.interpolate(self.back_im.unsqueeze(0),
@@ -207,7 +216,7 @@ class TEXTure:
 
         # Render from viewpoint
         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
-        render_cache = outputs['render_cache']
+        render_cache = outputs['render_cache'] # JA: All the render outputs have the shape of (1200, 1200)
         rgb_render_raw = outputs['image']  # Render where missing values have special color
         depth_render = outputs['depth']
         # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
@@ -230,13 +239,14 @@ class TEXTure:
         # text embeddings
         if self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
-            text_z = self.text_z[dirs]
+            text_z = self.text_z[dirs] # JA: dirs is one of the six directions. text_z is the embedding vector of the specific view prompt
             text_string = self.text_string[dirs]
         else:
             text_z = self.text_z
             text_string = self.text_string
         logger.info(f'text: {text_string}')
 
+        # JA: Create trimap of keep, refine, and generate using the render output
         update_mask, generate_mask, refine_mask = self.calculate_trimap(rgb_render_raw=rgb_render_raw,
                                                                         depth_render=depth_render,
                                                                         z_normals=z_normals,
@@ -255,44 +265,81 @@ class TEXTure:
         # Crop to inner region based on object mask
         min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-        cropped_rgb_render = crop(rgb_render)
+        cropped_rgb_render = crop(rgb_render) # JA: In our experiment, 1200 is cropped to 827
         cropped_depth_render = crop(depth_render)
         cropped_update_mask = crop(update_mask)
         self.log_train_image(cropped_rgb_render, name='cropped_input')
+        self.log_train_image(cropped_depth_render.repeat_interleave(3, dim=1), name='cropped_depth')
 
         checker_mask = None
         if self.paint_step > 1 or self.cfg.guide.initial_texture is not None:
+            # JA: generate_checkerboard is defined in formula 2 of the paper
             checker_mask = self.generate_checkerboard(crop(update_mask), crop(refine_mask),
                                                       crop(generate_mask))
             self.log_train_image(F.interpolate(cropped_rgb_render, (512, 512)) * (1 - checker_mask),
                                  'checkerboard_input')
         self.diffusion.use_inpaint = self.cfg.guide.use_inpainting and self.paint_step > 1
+        # JA: self.zero123_front_input has been added for Zero123 integration
+        if self.zero123_front_input is None:
+            resized_zero123_front_input = None
+        else: # JA: Even though zero123 front input is fixed, it will be resized to the rendered image of each viewpoint other than the front view
+            resized_zero123_front_input = F.interpolate(
+                self.zero123_front_input,
+                (cropped_rgb_render.shape[-2], cropped_rgb_render.shape[-1]) # JA: (H, W)
+            )
 
+        # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
+        # In the original implementation of TEXTure, the view direction information is contained in text_z. In
+        # the new version, text_z 
+        # D_t (depth map) = cropped_depth_render, Q_t (rendered image) = cropped_rgb_render.
+        # Trimap is defined by update_mask and checker_mask. cropped_rgb_output refers to the result of the
+        # Modified Diffusion Process.
         cropped_rgb_output, steps_vis = self.diffusion.img2img_step(text_z, cropped_rgb_render.detach(),
                                                                     cropped_depth_render.detach(),
                                                                     guidance_scale=self.cfg.guide.guidance_scale,
                                                                     strength=1.0, update_mask=cropped_update_mask,
                                                                     fixed_seed=self.cfg.optim.seed,
                                                                     check_mask=checker_mask,
-                                                                    intermediate_vis=self.cfg.log.vis_diffusion_steps)
+                                                                    intermediate_vis=self.cfg.log.vis_diffusion_steps,
+
+                                                                    # JA: The following were added to use the view image
+                                                                    # created by Zero123
+                                                                    view_dir=self.view_dirs[dirs],
+                                                                    front_image=resized_zero123_front_input,
+                                                                    phi=data['phi'],
+                                                                    theta=data['base_theta'] - data['theta'])
+
         self.log_train_image(cropped_rgb_output, name='direct_output')
         self.log_diffusion_steps(steps_vis)
-
-        cropped_rgb_output = F.interpolate(cropped_rgb_output,
+        # JA: cropped_rgb_output always has a shape of (512, 512); recover the resolution of the nonzero rendered image (e.g. (827, 827))
+        cropped_rgb_output = F.interpolate(cropped_rgb_output, 
                                            (cropped_rgb_render.shape[2], cropped_rgb_render.shape[3]),
                                            mode='bilinear', align_corners=False)
 
         # Extend rgb_output to full image size
-        rgb_output = rgb_render.clone()
-        rgb_output[:, :, min_h:max_h, min_w:max_w] = cropped_rgb_output
+        rgb_output = rgb_render.clone() # JA: rgb_render shape is 1200x1200
+        rgb_output[:, :, min_h:max_h, min_w:max_w] = cropped_rgb_output # JA: For example, (189, 1016, 68, 895) refers to the nonzero region of the render image
         self.log_train_image(rgb_output, name='full_output')
 
         # Project back
-        object_mask = outputs['mask']
+        object_mask = outputs['mask'] # JA: mask has a shape of 1200x1200
+        # JA: Compute a part of the texture atlas corresponding to the target render image of the specific viewpoint
         fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
                                                object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
                                                z_normals_cache=z_normals_cache)
         self.log_train_image(fitted_pred_rgb, name='fitted')
+
+        if self.view_dirs[dirs] == "front":
+            # JA: Zero123 needs the input image without the background
+            # rgb_output is the generated and uncropped image in pixel space
+            self.zero123_front_input = crop(
+                rgb_output * object_mask
+                + torch.ones_like(rgb_output, device=self.device) * (1 - object_mask)
+            )   # JA: In the case of front view, the shape is (930,930).
+                # This rendered image will be compressed to the shape of (512, 512) which is the shape of the diffusion
+                # model.
+
+            self.log_train_image(self.zero123_front_input, name='zero123_front_input')
 
         return
 
@@ -446,6 +493,12 @@ class TEXTure:
 
         optimizer = torch.optim.Adam(self.mesh_model.get_params(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
+            
+        # JA: Create the texture atlas for the mesh using each view. It updates the parameters
+        # of the neural network and the parameters are the pixel values of the texture atlas.
+        # The loss function of the neural network is the render loss. The loss is the difference
+        # between the specific image and the rendered image, rendered using the current estimate
+        # of the texture atlas.
         for _ in tqdm(range(200), desc='fitting mesh colors'):
             optimizer.zero_grad()
             outputs = self.mesh_model.render(background=background,
@@ -467,7 +520,8 @@ class TEXTure:
             masked_last_z_normals = z_normals_cache.reshape(1, z_normals_cache.shape[1], -1)[:, :,
                                     current_z_mask == 1][:, :1]
             loss += (masked_current_z_normals - masked_last_z_normals.detach()).pow(2).mean()
-            loss.backward()
+            loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
+                            # the network, that is, the pixel value of the texture atlas
             optimizer.step()
 
         return rgb_render, current_z_normals
