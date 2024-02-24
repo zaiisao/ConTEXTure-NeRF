@@ -24,7 +24,7 @@ from .zero123.zero123.ldm.util import instantiate_from_config
 class StableDiffusion(nn.Module):
     def __init__(self, device, model_name='CompVis/stable-diffusion-v1-4', concept_name=None, concept_path=None,
                  latent_mode=True,  min_timestep=0.02, max_timestep=0.98, no_noise=False,
-                 use_inpaint=False, second_model_type='control_zero123'):
+                 use_inpaint=False, second_model_type=None):
 
         assert second_model_type in [None, 'zero123', 'control_zero123']
 
@@ -88,7 +88,7 @@ class StableDiffusion(nn.Module):
         logger.info(f'\t successfully loaded stable diffusion!')
 
     def init_zero123(self, control=True):
-        if control == "control":
+        if control:
             config = OmegaConf.load("./src/zero123/ControlNet/models/cldm_zero123.yaml")
         else:
             config = OmegaConf.load("./src/zero123/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml")
