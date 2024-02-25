@@ -79,7 +79,9 @@ class TEXTure:
                                           min_timestep=self.cfg.optim.min_timestep,
                                           max_timestep=self.cfg.optim.max_timestep,
                                           no_noise=self.cfg.optim.no_noise,
-                                          use_inpaint=True)
+                                          use_inpaint=True,
+                                          second_model_type=self.cfg.guide.second_model_type,
+                                          guess_mode=self.cfg.guide.guess_mode)
 
         for p in diffusion_model.parameters():
             p.requires_grad = False

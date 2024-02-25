@@ -46,6 +46,10 @@ class GuideConfig:
     concept_path: Optional[Path] = None
     # A huggingface diffusion model to use
     diffusion_name: str = 'stabilityai/stable-diffusion-2-depth'
+
+    second_model_type: Optional[str] = None
+
+    guess_mode: Optional[bool] = False
     # Scale of mesh in 1x1x1 cube
     shape_scale: float = 0.6
     # height of mesh

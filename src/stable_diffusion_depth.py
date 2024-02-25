@@ -24,7 +24,7 @@ from .zero123.zero123.ldm.util import instantiate_from_config
 class StableDiffusion(nn.Module):
     def __init__(self, device, model_name='CompVis/stable-diffusion-v1-4', concept_name=None, concept_path=None,
                  latent_mode=True,  min_timestep=0.02, max_timestep=0.98, no_noise=False,
-                 use_inpaint=False, second_model_type=None):
+                 use_inpaint=False, second_model_type=None, guess_mode=False):
 
         assert second_model_type in [None, 'zero123', 'control_zero123']
 
@@ -47,6 +47,7 @@ class StableDiffusion(nn.Module):
         self.max_step = int(self.num_train_timesteps * max_timestep)
         self.use_inpaint = use_inpaint
         self.second_model_type = second_model_type
+        self.guess_mode = guess_mode
 
         logger.info(f'loading stable diffusion with {model_name}...')
 
@@ -110,7 +111,6 @@ class StableDiffusion(nn.Module):
         x, y, z=1.0,
         n_samples=1,
         scale=1.0,
-        guess_mode=False,
         use_control=True
     ):
         # JA: The following code is from gradio_new_depth_texture.py
@@ -147,7 +147,7 @@ class StableDiffusion(nn.Module):
             uc['c_crossattn'] = [torch.zeros_like(c).to(c.device)]
 
             if use_control:
-                uc['c_control'] = None if guess_mode else [control]
+                uc['c_control'] = None if self.guess_mode else [control]
         else:
             uc = None
 
