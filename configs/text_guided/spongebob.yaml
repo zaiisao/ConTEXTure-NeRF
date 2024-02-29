@@ -6,7 +6,7 @@ guide:
   shape_path: shapes/spongebob.obj
   guidance_scale: 7.5
   second_model_type: "control_zero123"
-  guess_mode: True
+  guess_mode: False
   # use_inpainting: False
 # optim:
 #   seed: 3

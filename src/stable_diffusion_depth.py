@@ -268,11 +268,6 @@ class StableDiffusion(nn.Module):
                    masked_latents=None):
             self.scheduler.set_timesteps(num_inference_steps)
             noise = None
-            # if self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
-            #     latents = torch.randn_like(latents, device=latents.device)
-            #     update_mask = None
-            #     check_mask = None
-
             if latents is None:
                 # Last chanel is reserved for depth
                 latents = torch.randn(
@@ -343,8 +338,11 @@ class StableDiffusion(nn.Module):
                                                 # embeddings of the cond image plus the relative camera pose
                             noise_pred = noise_pred_inpaint
 
-                    # JA: The following block was added to handle the control image for zero123
+                        # perform guidance
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                     elif self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
+                        # JA: The following block was added to handle the control image for zero123
                         use_control = self.second_model_type == "control_zero123"
 
                         cond, uc = self.get_zero123_inputs(
@@ -361,13 +359,61 @@ class StableDiffusion(nn.Module):
                             # apply_model call, because latent_model_input is created on the
                             # assumption that cond and uncond will be sampled at the same time
 
-                            if uc is None or guidance_scale == 1.:
-                                model_t = model_uncond = self.second_model.apply_model(latents, t, cond)
+                            if uc is None: # JA: We do not consider the negative direction of the unconditional/random generation
+                                # model_t = model_uncond = self.second_model.apply_model(latents, t, cond)
+                                noise_pred = self.second_model.apply_model(latents, t, cond)
                             else:
-                                model_t = self.second_model.apply_model(latents, t, cond)
-                                model_uncond = self.second_model.apply_model(latents, t, uc)
+                                # JA: We separate conditional generation and unconditional generation because the concatenating uncond
+                                # and cond raises a type mismatch error because cond can contain None value for c_control and None is
+                                # not a tensor
 
-                            noise_pred = torch.cat((model_uncond, model_t), dim=0)
+                                model_uncond_all = self.second_model.apply_model(latents, t, uc)
+
+                                individual_control_of_conditions = True
+                                guidance_scale_all = 5
+                                guidance_scale_crossattn = 5
+                                guidance_scale_concat = 5
+                                guidance_scale_control = 5
+
+                                if not individual_control_of_conditions:
+                                    # uncond-crossattn + uncond-concat + uncond-control <--> cond-crossattn + cond-concat + cond-control 
+                                    model_t = self.second_model.apply_model(latents, t, cond) # JA: model_t is common to all the cfg schemes
+                                    noise_pred = model_uncond_all + guidance_scale_all * (model_t - model_uncond_all)
+                                else:
+                                    model_uncond_crossattn = self.second_model.apply_model(latents, t, {
+                                        "c_crossattn": uc["c_crossattn"],
+                                        "c_concat": cond["c_concat"],
+                                        "c_control": cond["c_control"]
+                                    })
+
+                                    model_uncond_concat = self.second_model.apply_model(latents, t, {
+                                        "c_crossattn": cond["c_crossattn"],
+                                        "c_concat": uc["c_concat"],
+                                        "c_control": cond["c_control"]
+                                    })
+
+                                    model_uncond_control = self.second_model.apply_model(latents, t, {
+                                        "c_crossattn": cond["c_crossattn"],
+                                        "c_concat": cond["c_concat"],
+                                        "c_control": uc["c_control"]
+                                    })
+
+                                    # JA: Individual control of conditions
+                                    noise_pred_crossattn = guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
+                                    noise_pred_concat = guidance_scale_concat * (model_uncond_concat - model_uncond_all)
+                                    noise_pred_control = guidance_scale_control * (model_uncond_control - model_uncond_all)
+
+                                    noise_pred = model_uncond_all + noise_pred_crossattn + noise_pred_concat + noise_pred_control
+
+                                    # noise_pred = model_uncond_all + guidance_scale_concat * (model_uncond_concat - model_uncond_all)
+                                    #                               + guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
+                                    #                               + guidance_scale_control * (model_uncond_control - model_uncond_all)
+
+                                    # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
+                                    #            = a + CFG * (b - a)
+
+                                    # model_uncond = the unconditional prediction with all three conditions set to None
+                                    # model_uncond_concat = the unconditional prediction with only concat condition set to None
                     else:
                         latent_model_input_depth = torch.cat([latent_model_input, depth_mask], dim=1)
                         # predict the noise residual
@@ -375,9 +421,10 @@ class StableDiffusion(nn.Module):
                             noise_pred = self.unet(latent_model_input_depth, t, encoder_hidden_states=text_embeddings)[
                                 'sample']
 
-                    # perform guidance
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        # perform guidance
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                     # compute the previous noisy sample x_t -> x_t-1
 

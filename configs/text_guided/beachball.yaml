@@ -1,0 +1,11 @@
+log:
+  exp_name: beachball_puredepth
+guide:
+  text: "a yellow smiley face beachball, solid color, smooth, high quality, hd" #,  {} view"
+  # append_direction: True
+  shape_path: shapes/sphere.obj
+  # second_model_type: "control_zero123"
+  # guess_mode: False
+  guidance_scale: 10
+optim:
+  seed: 2
