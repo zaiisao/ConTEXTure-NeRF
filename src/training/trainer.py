@@ -207,9 +207,10 @@ class TEXTure:
         logger.info(f'Painting from theta: {theta}, phi: {phi}, radius: {radius}')
 
         # Set background image
-        if self.view_dirs[data['dir']] != "front":
-            background = torch.Tensor([1, 1, 1]).to(self.device)
-        elif self.cfg.guide.use_background_color:
+        # if self.view_dirs[data['dir']] != "front":
+        #     # JA: For Zero123, the input image background is always white
+        #     background = torch.Tensor([1, 1, 1]).to(self.device)
+        if self.cfg.guide.use_background_color:
             background = torch.Tensor([0, 0.8, 0]).to(self.device)
         else:
             background = F.interpolate(self.back_im.unsqueeze(0),
@@ -290,6 +291,21 @@ class TEXTure:
                 (cropped_rgb_render.shape[-2], cropped_rgb_render.shape[-1]) # JA: (H, W)
             )
 
+        condition_guiding_scales = None
+        if self.cfg.guide.individual_control_of_conditions:
+            if self.cfg.guide.second_model_type != "control_zero123":
+                raise NotImplementedError
+
+            assert self.cfg.guide.guidance_scale_crossattn is not None
+            assert self.cfg.guide.guidance_scale_concat is not None
+            assert self.cfg.guide.guidance_scale_control is not None
+
+            condition_guiding_scales = {
+                "guidance_scale_crossattn": self.cfg.guide.guidance_scale_crossattn,
+                "guidance_scale_concat": self.cfg.guide.guidance_scale_concat,
+                "guidance_scale_control": self.cfg.guide.guidance_scale_control,
+            }
+
         # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
         # In the original implementation of TEXTure, the view direction information is contained in text_z. In
         # the new version, text_z 
@@ -309,7 +325,8 @@ class TEXTure:
                                                                     view_dir=self.view_dirs[dirs],
                                                                     front_image=resized_zero123_front_input,
                                                                     phi=data['phi'],
-                                                                    theta=data['base_theta'] - data['theta'])
+                                                                    theta=data['base_theta'] - data['theta'],
+                                                                    condition_guiding_scales=condition_guiding_scales)
 
         self.log_train_image(cropped_rgb_output, name='direct_output')
         self.log_diffusion_steps(steps_vis)

@@ -2,7 +2,7 @@ import pyrallis
 import sys
 import os
 
-print(os.getcwd())
+# print(os.getcwd())
 sys.path.append("./src/zero123/zero123")
 sys.path.append("./src/zero123/ControlNet")
 

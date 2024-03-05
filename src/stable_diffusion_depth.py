@@ -94,7 +94,8 @@ class StableDiffusion(nn.Module):
         else:
             config = OmegaConf.load("./src/zero123/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml")
 
-        pl_sd = torch.load("./src/zero123/control_zero123.ckpt", map_location='cpu')
+        # pl_sd = torch.load("./src/zero123/control_zero123.ckpt", map_location='cpu')
+        pl_sd = torch.load("./src/zero123/epoch=12-step=4133.ckpt", map_location='cpu')
         sd = pl_sd['state_dict']
 
         model = instantiate_from_config(config.model).to(self.device)
@@ -113,6 +114,9 @@ class StableDiffusion(nn.Module):
         scale=1.0,
         use_control=True
     ):
+        # JA: x = phi (relative azimuth), y = theta (relative elevation), z = radius
+        # The reference view is the front view (phi, theta) = (0, 60)
+
         # JA: The following code is from gradio_new_depth_texture.py
 
         c = self.second_model.get_learned_conditioning(cond_image).tile(n_samples, 1, 1)
@@ -254,8 +258,8 @@ class StableDiffusion(nn.Module):
     def img2img_step(self, text_embeddings, inputs, original_depth_mask, guidance_scale=100, strength=0.5,
                      num_inference_steps=50, update_mask=None, latent_mode=False, check_mask=None,
                      fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False, view_dir=None,
-                     front_image=None, phi=None, theta=None):
-        # input is 1 3 512 512
+                     front_image=None, phi=None, theta=None, condition_guiding_scales=None):
+        # input is 1 3 512 512      # JA: inputs is cropped_rgb_render.detach()
         # depth_mask is 1 1 512 512
         # text_embeddings is 2 512 # JA: text_embeddings contains the single embedding for one of the six view prompts
 
@@ -304,30 +308,14 @@ class StableDiffusion(nn.Module):
                     mask_constraints_iters = True  # i < 20
                     is_inpaint_iter = is_inpaint_range  # and i %2 == 1
 
-                    if not is_inpaint_range and mask_constraints_iters:
-                        if update_mask is not None:
-                            noised_truth = self.scheduler.add_noise(gt_latents, noise, t) # JA: noised_truth is z_Q_t and gt_latents is z_Q_0 (00XX_cropped_input.jpg)
-                            # JA: update_mask and check_mask are used in both the inpainting and depth pipelines
-                            # This implements formula 2 of the paper.
-                            if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
-                                curr_mask = check_mask
-                            else:
-                                curr_mask = update_mask # JA: update_mask means "refine" in the paper
-
-                            # JA: This corresponds to the formula 1 of the equation paper.
-                            # z_i ← z_i * m_blended + z_Q_t * (1 − m_blended)
-                            # m_blended is curr_mask
-                            # On the right side, the latents is the random tensor and the noised_truth is the ground
-                            # truth with some noise. latents now refers to the image being denoised and plays the role of
-                            # x in apply_model.
-                            latents = latents * curr_mask + noised_truth * (1 - curr_mask)
-
-                    # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-                    latent_model_input = torch.cat([latents] * 2)
-                    latent_model_input = self.scheduler.scale_model_input(latent_model_input,
-                                                                          t)  # NOTE: This does nothing
-
                     if is_inpaint_iter:
+                        # JA: inpaint pipeline
+
+                        # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
+                        latent_model_input = torch.cat([latents] * 2)
+                        latent_model_input = self.scheduler.scale_model_input(latent_model_input,
+                                                                            t)  # NOTE: This does nothing
+
                         latent_mask = torch.cat([update_mask] * 2)
                         latent_image = torch.cat([masked_latents] * 2) # JA: latent_image is the masked latent image
                         latent_model_input_inpaint = torch.cat([latent_model_input, latent_mask, latent_image], dim=1)
@@ -341,90 +329,128 @@ class StableDiffusion(nn.Module):
                         # perform guidance
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                    elif self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
-                        # JA: The following block was added to handle the control image for zero123
-                        use_control = self.second_model_type == "control_zero123"
-
-                        cond, uc = self.get_zero123_inputs(
-                            F.interpolate(front_image, size=(512, 512)),
-                            F.interpolate(original_depth_mask, size=(512, 512))[0],
-                            phi, theta,
-                            scale=guidance_scale,
-                            use_control=use_control
-                        )
-
-                        t = t[None].to(self.device)
-                        with torch.no_grad():
-                            # JA: Note that latents -- not latent_model_input -- goes into each
-                            # apply_model call, because latent_model_input is created on the
-                            # assumption that cond and uncond will be sampled at the same time
-
-                            if uc is None: # JA: We do not consider the negative direction of the unconditional/random generation
-                                # model_t = model_uncond = self.second_model.apply_model(latents, t, cond)
-                                noise_pred = self.second_model.apply_model(latents, t, cond)
-                            else:
-                                # JA: We separate conditional generation and unconditional generation because the concatenating uncond
-                                # and cond raises a type mismatch error because cond can contain None value for c_control and None is
-                                # not a tensor
-
-                                model_uncond_all = self.second_model.apply_model(latents, t, uc)
-
-                                individual_control_of_conditions = True
-                                guidance_scale_all = 5
-                                guidance_scale_crossattn = 5
-                                guidance_scale_concat = 5
-                                guidance_scale_control = 5
-
-                                if not individual_control_of_conditions:
-                                    # uncond-crossattn + uncond-concat + uncond-control <--> cond-crossattn + cond-concat + cond-control 
-                                    model_t = self.second_model.apply_model(latents, t, cond) # JA: model_t is common to all the cfg schemes
-                                    noise_pred = model_uncond_all + guidance_scale_all * (model_t - model_uncond_all)
-                                else:
-                                    model_uncond_crossattn = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": uc["c_crossattn"],
-                                        "c_concat": cond["c_concat"],
-                                        "c_control": cond["c_control"]
-                                    })
-
-                                    model_uncond_concat = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": cond["c_crossattn"],
-                                        "c_concat": uc["c_concat"],
-                                        "c_control": cond["c_control"]
-                                    })
-
-                                    model_uncond_control = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": cond["c_crossattn"],
-                                        "c_concat": cond["c_concat"],
-                                        "c_control": uc["c_control"]
-                                    })
-
-                                    # JA: Individual control of conditions
-                                    noise_pred_crossattn = guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
-                                    noise_pred_concat = guidance_scale_concat * (model_uncond_concat - model_uncond_all)
-                                    noise_pred_control = guidance_scale_control * (model_uncond_control - model_uncond_all)
-
-                                    noise_pred = model_uncond_all + noise_pred_crossattn + noise_pred_concat + noise_pred_control
-
-                                    # noise_pred = model_uncond_all + guidance_scale_concat * (model_uncond_concat - model_uncond_all)
-                                    #                               + guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
-                                    #                               + guidance_scale_control * (model_uncond_control - model_uncond_all)
-
-                                    # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
-                                    #            = a + CFG * (b - a)
-
-                                    # model_uncond = the unconditional prediction with all three conditions set to None
-                                    # model_uncond_concat = the unconditional prediction with only concat condition set to None
                     else:
-                        latent_model_input_depth = torch.cat([latent_model_input, depth_mask], dim=1)
-                        # predict the noise residual
-                        with torch.no_grad():
-                            noise_pred = self.unet(latent_model_input_depth, t, encoder_hidden_states=text_embeddings)[
-                                'sample']
+                        # JA: depth pipeline
 
-                        # perform guidance
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        if mask_constraints_iters and update_mask is not None:
+                            noised_truth = self.scheduler.add_noise(gt_latents, noise, t) # JA: noised_truth is z_Q_t and gt_latents is z_Q_0 (00XX_cropped_input.jpg)
+                            # JA: update_mask and check_mask are used in both the inpainting and depth pipelines
+                            # This implements formula 2 of the paper.
+                            if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
+                                curr_mask = check_mask
+                            else:
+                                curr_mask = update_mask # JA: update_mask means "refine" in the paper
 
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                            # JA: This corresponds to the formula 1 of the equation paper.
+                            # z_i ← z_i * m_blended + z_Q_t * (1 − m_blended)
+                            # m_blended is curr_mask, which indicates the fill-in/inpaint location
+                            # (1 - curr_mask) is the background
+                            # On the right side, the latents is the random tensor and the noised_truth is the ground
+                            # truth with some noise. latents now refers to the image being denoised and plays the role of
+                            # x in apply_model.
+
+                            import torchvision
+                            torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_sample_image_{i}.png")
+                            torchvision.utils.save_image(self.decode_latents(noised_truth), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_noised_truth_{i}.png")
+                            torchvision.utils.save_image(F.interpolate(curr_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_curr_mask_{i}.png")
+                            torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_depth_mask.png")
+
+                            # JA: This blend operation is executed for the traditional depth pipeline and the zero123 pipeline
+                            latents = latents * curr_mask + noised_truth * (1 - curr_mask)
+                            # JA: latents is random initially
+
+                        if self.second_model_type is None or view_dir == "front":
+                            # JA: SD 2.0 depth pipeline
+
+                            # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
+                            latent_model_input = torch.cat([latents] * 2)
+                            latent_model_input = self.scheduler.scale_model_input(latent_model_input,
+                                                                                t)  # NOTE: This does nothing
+
+                            latent_model_input_depth = torch.cat([latent_model_input, depth_mask], dim=1)
+                            # predict the noise residual
+                            with torch.no_grad():
+                                noise_pred = self.unet(latent_model_input_depth, t, encoder_hidden_states=text_embeddings)[
+                                    'sample']
+
+                            # perform guidance
+                            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                        else:
+                            # JA: zero123 or control zero123
+
+                            # JA: The following block was added to handle the control image for zero123
+                            use_control = self.second_model_type == "control_zero123"
+
+                            cond, uc = self.get_zero123_inputs(
+                                F.interpolate(front_image, size=(512, 512)),
+                                F.interpolate(original_depth_mask, size=(512, 512))[0],
+                                phi, theta,
+                                scale=guidance_scale,
+                                use_control=use_control
+                            )
+
+                            t = t[None].to(self.device)
+                            with torch.no_grad():
+                                # JA: Note that latents -- not latent_model_input -- goes into each
+                                # apply_model call, because latent_model_input is created on the
+                                # assumption that cond and uncond will be sampled at the same time
+
+                                if uc is None: # JA: We do not consider the negative direction of the unconditional/random generation
+                                    # model_t = model_uncond = self.second_model.apply_model(latents, t, cond)
+                                    noise_pred = self.second_model.apply_model(latents, t, cond)
+                                else:
+                                    # JA: We separate conditional generation and unconditional generation because the concatenating uncond
+                                    # and cond raises a type mismatch error because cond can contain None value for c_control and None is
+                                    # not a tensor
+
+                                    model_uncond_all = self.second_model.apply_model(latents, t, uc)
+
+                                    # if not individual_control_of_conditions:
+                                    if condition_guiding_scales is None:
+                                        model_t = self.second_model.apply_model(latents, t, cond)
+                                        noise_pred = model_uncond_all + guidance_scale * (model_t - model_uncond_all)
+                                    else:
+                                        model_uncond_crossattn = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": uc["c_crossattn"],
+                                            "c_concat": cond["c_concat"],
+                                            "c_control": cond["c_control"]
+                                        })
+
+                                        model_uncond_concat = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": cond["c_crossattn"],
+                                            "c_concat": uc["c_concat"],
+                                            "c_control": cond["c_control"]
+                                        })
+
+                                        model_uncond_control = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": cond["c_crossattn"],
+                                            "c_concat": cond["c_concat"],
+                                            "c_control": uc["c_control"]
+                                        })
+
+                                        guidance_scale_crossattn = condition_guiding_scales["guidance_scale_crossattn"]
+                                        guidance_scale_concat = condition_guiding_scales["guidance_scale_concat"]
+                                        guidance_scale_control = condition_guiding_scales["guidance_scale_control"]
+
+                                        # JA: Individual control of conditions
+                                        noise_pred_crossattn = guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
+                                        noise_pred_concat = guidance_scale_concat * (model_uncond_concat - model_uncond_all)
+                                        noise_pred_control = guidance_scale_control * (model_uncond_control - model_uncond_all)
+
+                                        noise_pred = model_uncond_all + noise_pred_crossattn + noise_pred_concat + noise_pred_control
+
+                                        # noise_pred = model_uncond_all + guidance_scale_concat * (model_uncond_concat - model_uncond_all)
+                                        #                               + guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
+                                        #                               + guidance_scale_control * (model_uncond_control - model_uncond_all)
+
+                                        # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
+                                        #            = a + CFG * (b - a)
+
+                                        # model_uncond = the unconditional prediction with all three conditions set to None
+                                        # model_uncond_concat = the unconditional prediction with only concat condition set to None
 
                     # compute the previous noisy sample x_t -> x_t-1
 
@@ -439,11 +465,9 @@ class StableDiffusion(nn.Module):
                         image = image.cpu().permute(0, 2, 3, 1).numpy()
                         image = Image.fromarray((image[0] * 255).round().astype("uint8"))
                         intermediate_results.append(image)
-                    latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
 
-                    import torchvision
-                    torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/sample_image_{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}.png")
-                    torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/depth_mask_{phi}_{theta}.png")
+                    # JA: Denoise one step. This is applied for every pipeline at each iteration
+                    latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
 
             return latents
         # JA: end of sample function

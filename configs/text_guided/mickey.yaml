@@ -1,0 +1,18 @@
+log:
+  exp_name: mickeycolor_c0123_3_5_3
+guide:
+  text: "A photo of Mickey Mouse, black top, red pants, yellow boots, {} view"
+  append_direction: True
+  shape_path: shapes/mickey.obj
+  guidance_scale: 10
+  second_model_type: "control_zero123"
+
+  individual_control_of_conditions: True
+  guidance_scale_crossattn: 3
+  guidance_scale_concat: 5
+  guidance_scale_control: 3
+
+  guess_mode: False
+  # use_inpainting: False
+# optim:
+#   seed: 2
