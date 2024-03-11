@@ -796,7 +796,7 @@ class LatentDiffusion(DDPM): # JA This is the latent diffusion class defined by 
     #     return out
     @torch.no_grad() #MJ: get_input method is modified from the standard get_input of LatentDiffusion to handle the relative camera pose T
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None):
+                  cond_key=None, return_original_cond=False, bs=None, return_random=False):
                   #cond_key=None, return_original_cond=False, bs=None, uncond=False):
                   # uncond removed by JA: To allow for customization in the config file, I moved the
                   # uncond value initialization to the __init__ function and named it condition_dropout
@@ -836,8 +836,13 @@ class LatentDiffusion(DDPM): # JA This is the latent diffusion class defined by 
         if return_first_stage_outputs: # JA: This is false in our experiment
             xrec = self.decode_first_stage(z)
             out.extend([x, xrec])
+
         if return_original_cond: # JA: This is false in our experiment
             out.append(xc)
+
+        if return_random:
+            out.append(random)
+
         return out
 
     # @torch.no_grad()
@@ -1545,7 +1550,7 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm', 'hybrid-adm']
 
-    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, c_adm=None, c_control=None):
+    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None, c_adm=None):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':

@@ -155,7 +155,8 @@ class StableDiffusion(nn.Module):
             uc['c_crossattn'] = [torch.zeros_like(c).to(c.device)]
 
             if use_control:
-                uc['c_control'] = None if self.guess_mode else [control]
+                # uc['c_control'] = None if self.guess_mode else [control]
+                uc['c_control'] = [torch.zeros_like(control).to(control.device)]
         else:
             uc = None
 

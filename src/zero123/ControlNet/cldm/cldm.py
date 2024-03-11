@@ -321,7 +321,9 @@ class ControlLDM(LatentDiffusion):
 
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs): # JA: Override get_input of LatentDiffusion (Zero123 version)
-        x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs) # JA: get_input of ControlLDM invokes get_input of LatentDiffusion. x is a tensor (b, 4, 32, 32), c is a dict with c_crossattn (4, 1, 768) and c_concat in the latent space (4, 4, 32, 32)
+        # x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs) # JA: get_input of ControlLDM invokes get_input of LatentDiffusion. x is a tensor (b, 4, 32, 32), c is a dict with c_crossattn (4, 1, 768) and c_concat in the latent space (4, 4, 32, 32)
+        x, c, random = super().get_input(batch, self.first_stage_key, return_random=True, bs=bs, *args, **kwargs)
+
         control = batch[self.control_key] # JA: control_key is hint
         if bs is not None:
             control = control[:bs]
@@ -329,10 +331,15 @@ class ControlLDM(LatentDiffusion):
         control = einops.rearrange(control, 'b h w c -> b c h w') # JA: (4, 256, 256, 3) -> (4, 3, 256, 256) (in the pixel space). x is in the latent space
         control = control.to(memory_format=torch.contiguous_format).float()
 
+        random_is_within_all_uncond_range = (random >= self.condition_dropout).float() * (random < 2 * self.condition_dropout).float()
+        random_is_within_control_dropout_range = (random >= self.condition_dropout * 3).float() * (random < 4 * self.condition_dropout).float()
+
+        control_mask = 1 - rearrange(random_is_within_all_uncond_range + random_is_within_control_dropout_range, "n -> n 1 1 1")
+
         # JA: c = { c_concat: x } or { c_concat: x, c_crossattn: y } or { c_crossattn: y }
         # JA: If we want to use both the concat condition and the hint condition, we have to make the
         # distinction here, resulting in three values in the dictionary to be returned.
-        c['c_control'] = [control] # JA: control has a shape of (4, 3, 256, 256)
+        c['c_control'] = [control_mask * control] # JA: control has a shape of (4, 3, 256, 256)
         return x, c
 
     #MJ: called by p_losses() which is called by shared_step() which is called by training_step()
@@ -400,7 +407,8 @@ class ControlLDM(LatentDiffusion):
         log["reconstruction"] = self.decode_first_stage(z)
         
         #MJ: log["control"] = c_cat * 2.0 - 1.0 #MJ: [0,1] => [-1,1]; new in ControlLDM
-        log["control"] = c_con * 2.0 - 1.0 # JA: ([-1, 1] * 2) - 1 => [-2, 2] - 1 => [-3, 1]
+        # log["control"] = c_con * 2.0 - 1.0 # JA: ([-1, 1] * 2) - 1 => [-2, 2] - 1 => [-3, 1]
+        log["control"] = c_con
         #MJ: To run the neuralnet in sampling mode, we need to normalize the control image, because
         # it is not yet normalized.
 
@@ -467,7 +475,7 @@ class ControlLDM(LatentDiffusion):
             # MJ: calls get_unconditonal_conditinong() defined in the zero123 LatentDiffusion 
             # JA: uc_full contains c_concat and c_crossattn conditions
             uc_full = self.get_unconditional_conditioning(N, unconditional_guidance_label, image_size=c_con.shape[-1])
-            uc_full["c_control"] = [c_con] * N # JA: In this case, the c_control value of the uncond is not None. Therefore we do not need the hacked code of apply_model method. This is the case during the training but during the inference we need to use the hacked code of apply_model
+            uc_full["c_control"] = [torch.zeros_like(c_con).to(c_con.device)] * N # JA: In this case, the c_control value of the uncond is not None. Therefore we do not need the hacked code of apply_model method. This is the case during the training but during the inference we need to use the hacked code of apply_model
 
             #MJ: In our controlNet+ zero123, we use both cond['c_concat'] and cond['c_control']
             
