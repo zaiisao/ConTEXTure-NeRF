@@ -41,7 +41,7 @@ class TEXTure:
         self.init_logger()
         pyrallis.dump(self.cfg, (self.exp_path / 'config.yaml').open('w'))
 
-        self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom']
+        self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
         self.mesh_model = self.init_mesh_model()
         self.diffusion = self.init_diffusion()
         self.text_z, self.text_string = self.calc_text_embeddings()
@@ -198,6 +198,7 @@ class TEXTure:
 
             logger.info(f"\tDone!")
 
+    # JA: paint_viewpoint computes a portion of the texture atlas for the given viewpoint
     def paint_viewpoint(self, data: Dict[str, Any]):
         logger.info(f'--- Painting step #{self.paint_step} ---')
         theta, phi, radius = data['theta'], data['phi'], data['radius'] # JA: data represents a viewpoint which is stored in the dataset
@@ -207,12 +208,12 @@ class TEXTure:
         logger.info(f'Painting from theta: {theta}, phi: {phi}, radius: {radius}')
 
         # Set background image
-        # if self.view_dirs[data['dir']] != "front":
-        #     # JA: For Zero123, the input image background is always white
-        #     background = torch.Tensor([1, 1, 1]).to(self.device)
-        if self.cfg.guide.use_background_color:
+        if  True: #self.cfg.guide.second_model_type in ["zero123", "control_zero123"]: #self.view_dirs[data['dir']] != "front":
+            # JA: For Zero123, the input image background is always white
+            background = torch.Tensor([1, 1, 1]).to(self.device)
+        elif self.cfg.guide.use_background_color: # JA: When use_background_color is True, set the background to the green color
             background = torch.Tensor([0, 0.8, 0]).to(self.device)
-        else:
+        else: # JA: Otherwise, set the background to the brick image
             background = F.interpolate(self.back_im.unsqueeze(0),
                                        (self.cfg.render.train_grid_size, self.cfg.render.train_grid_size),
                                        mode='bilinear', align_corners=False)
@@ -312,6 +313,9 @@ class TEXTure:
         # D_t (depth map) = cropped_depth_render, Q_t (rendered image) = cropped_rgb_render.
         # Trimap is defined by update_mask and checker_mask. cropped_rgb_output refers to the result of the
         # Modified Diffusion Process.
+
+        # JA: So far, the render image was created. Now we generate the image using the SD pipeline
+        # Our pipeline uses the rendered image in the process of generating the image.
         cropped_rgb_output, steps_vis = self.diffusion.img2img_step(text_z, cropped_rgb_render.detach(),
                                                                     cropped_depth_render.detach(),
                                                                     guidance_scale=self.cfg.guide.guidance_scale,
@@ -322,7 +326,7 @@ class TEXTure:
 
                                                                     # JA: The following were added to use the view image
                                                                     # created by Zero123
-                                                                    view_dir=self.view_dirs[dirs],
+                                                                    view_dir=self.view_dirs[dirs], # JA: view_dir = "left", this is used to check if the view direction is front
                                                                     front_image=resized_zero123_front_input,
                                                                     phi=data['phi'],
                                                                     theta=data['base_theta'] - data['theta'],

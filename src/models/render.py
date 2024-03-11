@@ -32,8 +32,8 @@ class Renderer:
 
 
     def normalize_depth(self, depth_map):
-        assert depth_map.max() <= 0.0, 'depth map should be negative'
-        object_mask = depth_map != 0
+        assert depth_map.max() <= 0.0, 'depth map should be negative' # JA: In the standard computer graphics, the camera view direction is the negative z axis
+        object_mask = depth_map != 0 # JA: The region where the depth map is not 0 means that it is the object region
         # depth_map[object_mask] = (depth_map[object_mask] - depth_map[object_mask].min()) / (
         #             depth_map[object_mask].max() - depth_map[object_mask].min())
         # depth_map = depth_map ** 4
@@ -82,9 +82,9 @@ class Renderer:
                                                     look_at_height=look_at_height).to(self.device)
             face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
                 verts.to(self.device), faces.to(self.device), self.camera_projection, camera_transform=camera_transform)
-
+            # JA: face_vertices_camera[:, :, :, -1] likely refers to the z-component (depth component) of these coordinates, used both for depth mapping and for determining how textures map onto the surfaces during UV feature generation.
             depth_map, _ = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
-                                                              face_vertices_image, face_vertices_camera[:, :, :, -1:])
+                                                              face_vertices_image, face_vertices_camera[:, :, :, -1:]) 
             depth_map = self.normalize_depth(depth_map)
 
             uv_features, face_idx = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],

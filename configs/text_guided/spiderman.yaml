@@ -1,5 +1,5 @@
 log:
-  exp_name: spiderman_control0123
+  exp_name: spiderman_1_9_1
 guide:
   text: "A photo of Spiderman, {} view"
   append_direction: True
@@ -8,11 +8,9 @@ guide:
   second_model_type: "control_zero123"
 
   individual_control_of_conditions: True
-  guidance_scale_crossattn: 3
-  guidance_scale_concat: 3
+  guidance_scale_crossattn: 1
+  guidance_scale_concat: 9
   guidance_scale_control: 1
 
-  guess_mode: False
-  # use_inpainting: False
-# optim:
-#   seed: 3
+  guess_mode: True
+  use_inpainting: False

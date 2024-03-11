@@ -18,6 +18,9 @@ from PIL import Image
 import math
 from einops import rearrange
 
+import torchvision
+import os
+
 from omegaconf import OmegaConf
 from .zero123.zero123.ldm.util import instantiate_from_config
 
@@ -139,7 +142,8 @@ class StableDiffusion(nn.Module):
             control = 2. * (depth_map - depth_min) / (depth_max - depth_min) - 1.
             control = torch.stack([control for _ in range(n_samples)], dim=0)
             # control = rearrange(control, 'b h w c -> b c h w').clone()
-            control = control.repeat_interleave(3, dim=1)
+            # control = control.repeat_interleave(3, dim=1) # (b, 1, 512, 512) -> (b, 3, 512, 512)
+            control = torch.concat([control, control, control], dim=1).to(control.device)
 
             cond['c_control'] = [control]
 
@@ -349,15 +353,41 @@ class StableDiffusion(nn.Module):
                             # truth with some noise. latents now refers to the image being denoised and plays the role of
                             # x in apply_model.
 
-                            import torchvision
-                            torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_sample_image_{i}.png")
-                            torchvision.utils.save_image(self.decode_latents(noised_truth), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_noised_truth_{i}.png")
-                            torchvision.utils.save_image(F.interpolate(curr_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_curr_mask_{i}.png")
-                            torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_depth_mask.png")
+                            torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_latents_before.png")
+                            torchvision.utils.save_image(self.decode_latents(noised_truth), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_noised_truth.png")
+                            torchvision.utils.save_image(F.interpolate(curr_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_curr_mask.png")
+                            # torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_depth_mask.png")
+                            torchvision.utils.save_image(pred_rgb_512, f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_pred_rgb_512.png")
 
                             # JA: This blend operation is executed for the traditional depth pipeline and the zero123 pipeline
                             latents = latents * curr_mask + noised_truth * (1 - curr_mask)
-                            # JA: latents is random initially
+                            torchvision.utils.save_image(self.decode_latents(latents), f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_latents_after.png")
+
+                            debug_image_paths = [
+                                f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_latents_before.png",
+                                f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_pred_rgb_512.png",
+                                f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_noised_truth.png",
+                                f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_curr_mask.png",
+                                f"/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_latents_after.png"
+                            ]
+                            images = [Image.open(x) for x in debug_image_paths]
+                            widths, heights = zip(*(i.size for i in images))
+
+                            total_width = sum(widths)
+                            max_height = max(heights)
+
+                            new_im = Image.new('RGB', (total_width, max_height))
+
+                            x_offset = 0
+                            for im in images:
+                                new_im.paste(im, (x_offset,0))
+                                x_offset += im.size[0]
+
+                            new_im.save(f'/home/jaehoon/texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}.png')
+
+                            for image_path in debug_image_paths:
+                                os.remove(image_path)
+                        # JA: latents is random initially
 
                         if self.second_model_type is None or view_dir == "front":
                             # JA: SD 2.0 depth pipeline
@@ -499,6 +529,7 @@ class StableDiffusion(nn.Module):
         if check_mask is not None:
             check_mask = F.interpolate(check_mask, (64, 64), mode='nearest')
 
+        # JA: Normalize depth map so that its values range from -1 to +1
         depth_mask = 2.0 * (depth_mask - depth_mask.min()) / (depth_mask.max() - depth_mask.min()) - 1.0
 
         # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
@@ -515,7 +546,7 @@ class StableDiffusion(nn.Module):
                                                                 # by means of the relative camera pose.
 
         if latent_mode:
-            return target_rgb, target_latents
+            return target_rgb, target_latents # JA: The target_rgb is the result from denoising the blended latent
         else:
             return target_rgb, intermediate_results
 

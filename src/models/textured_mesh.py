@@ -123,12 +123,12 @@ class TexturedMeshModel(nn.Module):
         self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
                                  interpolation_mode=self.opt.texture_interpolation_mode)
         self.env_sphere, self.mesh = self.init_meshes()
-        self.default_color = [0.8, 0.1, 0.8]
-        self.background_sphere_colors, self.texture_img = self.init_paint()
+        self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
+        self.background_sphere_colors, self.texture_img = self.init_paint() # JA: self.texture_img is a learnable parameter
         self.meta_texture_img = nn.Parameter(torch.zeros_like(self.texture_img)) # JA: self.texture_img is the texture atlas
                                 # define self.meta_texture_img variable to be the parameter of the neural network whose init
                                 # value is set to a zero tensor
-        if self.opt.reference_texture:
+        if self.opt.reference_texture: # JA: This value is None by default
             base_texture = torch.Tensor(np.array(Image.open(self.opt.reference_texture).resize(
                 (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
             change_mask = (
@@ -225,7 +225,7 @@ class TexturedMeshModel(nn.Module):
         if self.initial_texture_path is not None:
             texture = torch.Tensor(np.array(Image.open(self.initial_texture_path).resize(
                 (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
-        else:
+        else: # JA: This is the case in our experiment
             texture = torch.ones(1, 3, self.texture_resolution, self.texture_resolution).cuda() * torch.Tensor(
                 self.default_color).reshape(1, 3, 1, 1).cuda()
         texture_img = nn.Parameter(texture)
@@ -360,7 +360,7 @@ class TexturedMeshModel(nn.Module):
             assert theta is not None and phi is not None and radius is not None
         background_sphere_colors = self.background_sphere_colors[
             torch.randint(0, self.background_sphere_colors.shape[0], (1,))]
-        if use_meta_texture:
+        if use_meta_texture: # JA: During training of the network, we either learn meta texture or texture
             texture_img = self.meta_texture_img
         else:
             texture_img = self.texture_img
@@ -381,7 +381,7 @@ class TexturedMeshModel(nn.Module):
                 texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
         background_type = 'none'
         use_render_back = False
-        if background is not None and type(background) == str:
+        if background is not None and type(background) == str: # JA: If background is a string, set it as the type
             background_type = background
             use_render_back = True
         pred_features, mask, depth, normals, render_cache = self.renderer.render_single_view_texture(augmented_vertices,
