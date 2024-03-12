@@ -796,7 +796,7 @@ class LatentDiffusion(DDPM): # JA This is the latent diffusion class defined by 
     #     return out
     @torch.no_grad() #MJ: get_input method is modified from the standard get_input of LatentDiffusion to handle the relative camera pose T
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None, return_random=False):
+                  cond_key=None, return_original_cond=False, bs=None):
                   #cond_key=None, return_original_cond=False, bs=None, uncond=False):
                   # uncond removed by JA: To allow for customization in the config file, I moved the
                   # uncond value initialization to the __init__ function and named it condition_dropout
@@ -815,33 +815,15 @@ class LatentDiffusion(DDPM): # JA This is the latent diffusion class defined by 
         xc = super().get_input(batch, cond_key).to(self.device) # JA: (1, 3, 256, 256)
         if bs is not None:
             xc = xc[:bs]
-        cond = {}
 
-        # To support classifier-free guidance, randomly drop out only text conditioning (c_crossattn / image-cond and RT) 5%, only image conditioning (c_concat / image-cond) 5%, and both 5%.
-        random = torch.rand(x.size(0), device=x.device)
-        prompt_mask = rearrange(random < 2 * self.condition_dropout, "n -> n 1 1")  #MJ: condition_dropout = 0.05 = 5%; 0< random < 0.05*2
-        input_mask = 1 - rearrange((random >= self.condition_dropout).float() * (random < 3 * self.condition_dropout).float(), "n -> n 1 1 1") # 0.05 < random < 3*0.05
-        null_prompt = self.get_learned_conditioning([""])
-
-        # z.shape: [8, 4, 64, 64]; c.shape: [8, 1, 768]
-        # print('=========== xc shape ===========', xc.shape)
-        with torch.enable_grad():
-            clip_emb = self.get_learned_conditioning(xc).detach()
-            null_prompt = self.get_learned_conditioning([""]).detach()
-            cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(prompt_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))]
-            
-        cond["c_concat"] = [input_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
-        out = [z, cond] # JA: z is a tensor, and cond is a dictionary. cond["c_crossattn"] and cond["c_concat"] are lists of one tensor each
+        out = [z, T] # JA: z is a tensor, and cond is a dictionary. cond["c_crossattn"] and cond["c_concat"] are lists of one tensor each
        
         if return_first_stage_outputs: # JA: This is false in our experiment
             xrec = self.decode_first_stage(z)
             out.extend([x, xrec])
 
-        if return_original_cond: # JA: This is false in our experiment
+        if return_original_cond: # JA: This is true in our experiment
             out.append(xc)
-
-        if return_random:
-            out.append(random)
 
         return out
 

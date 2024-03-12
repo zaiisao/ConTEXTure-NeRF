@@ -319,10 +319,48 @@ class ControlLDM(LatentDiffusion):
         self.only_mid_control = only_mid_control
         self.control_scales = [1.0] * 13
 
+    def is_between(self, values, multiplier1=None, multiplier2=None):
+        if multiplier1 is None and multiplier2 is not None:
+            return values < self.condition_dropout * multiplier2
+        elif multiplier1 is not None and multiplier2 is None:
+            return values >= self.condition_dropout * multiplier1
+
+        assert multiplier1 is not None and multiplier2 is not None
+
+        return torch.logical_and(values >= self.condition_dropout * multiplier1, values < self.condition_dropout * multiplier2)
+
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs): # JA: Override get_input of LatentDiffusion (Zero123 version)
         # x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs) # JA: get_input of ControlLDM invokes get_input of LatentDiffusion. x is a tensor (b, 4, 32, 32), c is a dict with c_crossattn (4, 1, 768) and c_concat in the latent space (4, 4, 32, 32)
-        x, c, random = super().get_input(batch, self.first_stage_key, return_random=True, bs=bs, *args, **kwargs)
+        x, T, xc = super().get_input(batch, self.first_stage_key, bs=bs, return_original_cond=True, *args, **kwargs)
+
+        cond = {}
+
+        # To support classifier-free guidance, randomly drop out only text conditioning (c_crossattn / image-cond and RT) 5%, only image conditioning (c_concat / image-cond) 5%, and both 5%.
+        random = torch.rand(x.size(0), device=x.device)
+
+        # prompt_mask = rearrange(random >= self.condition_dropout and random < 2 * self.condition_dropout, "n -> n 1 1")  #MJ: condition_dropout = 0.05 = 5%; 0< random < 0.05*2
+        # input_mask = 1 - rearrange((random >= self.condition_dropout).float() * (random < 3 * self.condition_dropout).float(), "n -> n 1 1 1") # 0.05 < random < 3*0.05
+
+        # JA:
+        # |0.15       0.30       0.45       0.60                     1.00
+        # |           111111111112222222222233333333333123123123123123123
+        # |ALL UNCOND|JUST CA   |JUST CC   |JUST CT   |ALL COND
+
+        crossattn_mask = rearrange(torch.logical_or(self.is_between(random, None, 1), self.is_between(random, 2, 4)), "n -> n 1 1")  #MJ: condition_dropout = 0.05 = 5%; 0< random < 0.05*2
+        concat_mask = rearrange(~torch.logical_or(self.is_between(random, None, 2), self.is_between(random, 3, 4)), "n -> n 1 1 1") # 0.05 < random < 3*0.05
+        control_mask = rearrange(self.is_between(random, None, 3), "n -> n 1 1 1")
+
+        null_prompt = self.get_learned_conditioning([""])
+
+        # z.shape: [8, 4, 64, 64]; c.shape: [8, 1, 768]
+        # print('=========== xc shape ===========', xc.shape)
+        with torch.enable_grad():
+            clip_emb = self.get_learned_conditioning(xc).detach()
+            null_prompt = self.get_learned_conditioning([""]).detach()
+            cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(crossattn_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))]
+            
+        cond["c_concat"] = [concat_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
 
         control = batch[self.control_key] # JA: control_key is hint
         if bs is not None:
@@ -331,29 +369,15 @@ class ControlLDM(LatentDiffusion):
         control = einops.rearrange(control, 'b h w c -> b c h w') # JA: (4, 256, 256, 3) -> (4, 3, 256, 256) (in the pixel space). x is in the latent space
         control = control.to(memory_format=torch.contiguous_format).float()
 
-        # JA: If 0.15 <= random < 0.3, it means crossattn and concat conditions were already dropped out
-        # but in this case, we also want to drop out the control cond
-        random_is_within_all_dropout_range = (random >= self.condition_dropout).float() * (random < 2 * self.condition_dropout).float()
-        random_is_within_control_dropout_range = (random >= self.condition_dropout * 3).float() * (random < 4 * self.condition_dropout).float()
-
-        # JA: If control_mask is 0, it means we drop out either all conditions or the control condition
-        # In fact, if random number is greater than 0.45 and less than 0.6, only the control condition
-        # is dropped out. If random number is greater than 0.15 and less than 0.3, the cross attention
-        # and concat conditions were already dropped out in super().get_input() and we also drop out the
-        # control condition.
-
-        also_control_dropout_mask = rearrange(random_is_within_all_dropout_range, "n -> n 1 1 1")
-        only_control_dropout_mask = rearrange(random_is_within_control_dropout_range, "n -> n 1 1 1")
-
         # JA: c = { c_concat: x } or { c_concat: x, c_crossattn: y } or { c_crossattn: y }
         # JA: If we want to use both the concat condition and the hint condition, we have to make the
         # distinction here, resulting in three values in the dictionary to be returned.
-        c['c_control'] = [torch.where(
-            torch.logical_or(also_control_dropout_mask, only_control_dropout_mask),
+        cond['c_control'] = [torch.where(
+            control_mask,
             torch.zeros_like(control).to(control.device),
             control
         )] # JA: control has a shape of (4, 3, 256, 256)
-        return x, c
+        return x, cond
 
     #MJ: called by p_losses() which is called by shared_step() which is called by training_step()
     def apply_model(self, x_noisy, t, cond, *args, **kwargs): # JA: Override apply_model method of LatentDiffusion; MJ: cond could be uncond

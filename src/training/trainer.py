@@ -297,14 +297,14 @@ class TEXTure:
             if self.cfg.guide.second_model_type != "control_zero123":
                 raise NotImplementedError
 
-            assert self.cfg.guide.guidance_scale_concat_control is not None
-            assert self.cfg.guide.guidance_scale_crossattn_control is not None
-            assert self.cfg.guide.guidance_scale_crossattn_concat is not None
+            assert self.cfg.guide.guidance_scale_crossattn is not None
+            assert self.cfg.guide.guidance_scale_concat is not None
+            assert self.cfg.guide.guidance_scale_control is not None
 
             condition_guidance_scales = {
-                "concat_control": self.cfg.guide.guidance_scale_concat_control,
-                "crossattn_control": self.cfg.guide.guidance_scale_crossattn_control,
-                "crossattn_concat": self.cfg.guide.guidance_scale_crossattn_concat,
+                "crossattn": self.cfg.guide.guidance_scale_crossattn,
+                "concat": self.cfg.guide.guidance_scale_concat,
+                "control": self.cfg.guide.guidance_scale_control,
             }
 
         # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
