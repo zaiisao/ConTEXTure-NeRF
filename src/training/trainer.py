@@ -292,19 +292,19 @@ class TEXTure:
                 (cropped_rgb_render.shape[-2], cropped_rgb_render.shape[-1]) # JA: (H, W)
             )
 
-        condition_guiding_scales = None
+        condition_guidance_scales = None
         if self.cfg.guide.individual_control_of_conditions:
             if self.cfg.guide.second_model_type != "control_zero123":
                 raise NotImplementedError
 
-            assert self.cfg.guide.guidance_scale_crossattn is not None
-            assert self.cfg.guide.guidance_scale_concat is not None
-            assert self.cfg.guide.guidance_scale_control is not None
+            assert self.cfg.guide.guidance_scale_concat_control is not None
+            assert self.cfg.guide.guidance_scale_crossattn_control is not None
+            assert self.cfg.guide.guidance_scale_crossattn_concat is not None
 
-            condition_guiding_scales = {
-                "guidance_scale_crossattn": self.cfg.guide.guidance_scale_crossattn,
-                "guidance_scale_concat": self.cfg.guide.guidance_scale_concat,
-                "guidance_scale_control": self.cfg.guide.guidance_scale_control,
+            condition_guidance_scales = {
+                "concat_control": self.cfg.guide.guidance_scale_concat_control,
+                "crossattn_control": self.cfg.guide.guidance_scale_crossattn_control,
+                "crossattn_concat": self.cfg.guide.guidance_scale_crossattn_concat,
             }
 
         # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
@@ -330,7 +330,7 @@ class TEXTure:
                                                                     front_image=resized_zero123_front_input,
                                                                     phi=data['phi'],
                                                                     theta=data['base_theta'] - data['theta'],
-                                                                    condition_guiding_scales=condition_guiding_scales)
+                                                                    condition_guidance_scales=condition_guidance_scales)
 
         self.log_train_image(cropped_rgb_output, name='direct_output')
         self.log_diffusion_steps(steps_vis)

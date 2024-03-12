@@ -8,9 +8,9 @@ guide:
   second_model_type: "control_zero123"
 
   individual_control_of_conditions: True
-  guidance_scale_crossattn: 1
-  guidance_scale_concat: 9
-  guidance_scale_control: 1
+  guidance_scale_concat_control: 1
+  guidance_scale_crossattn_control: 9
+  guidance_scale_crossattn_concat: 1
 
   guess_mode: True
   use_inpainting: False

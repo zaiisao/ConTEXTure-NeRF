@@ -331,15 +331,28 @@ class ControlLDM(LatentDiffusion):
         control = einops.rearrange(control, 'b h w c -> b c h w') # JA: (4, 256, 256, 3) -> (4, 3, 256, 256) (in the pixel space). x is in the latent space
         control = control.to(memory_format=torch.contiguous_format).float()
 
-        random_is_within_all_uncond_range = (random >= self.condition_dropout).float() * (random < 2 * self.condition_dropout).float()
+        # JA: If 0.15 <= random < 0.3, it means crossattn and concat conditions were already dropped out
+        # but in this case, we also want to drop out the control cond
+        random_is_within_all_dropout_range = (random >= self.condition_dropout).float() * (random < 2 * self.condition_dropout).float()
         random_is_within_control_dropout_range = (random >= self.condition_dropout * 3).float() * (random < 4 * self.condition_dropout).float()
 
-        control_mask = 1 - rearrange(random_is_within_all_uncond_range + random_is_within_control_dropout_range, "n -> n 1 1 1")
+        # JA: If control_mask is 0, it means we drop out either all conditions or the control condition
+        # In fact, if random number is greater than 0.45 and less than 0.6, only the control condition
+        # is dropped out. If random number is greater than 0.15 and less than 0.3, the cross attention
+        # and concat conditions were already dropped out in super().get_input() and we also drop out the
+        # control condition.
+
+        also_control_dropout_mask = rearrange(random_is_within_all_dropout_range, "n -> n 1 1 1")
+        only_control_dropout_mask = rearrange(random_is_within_control_dropout_range, "n -> n 1 1 1")
 
         # JA: c = { c_concat: x } or { c_concat: x, c_crossattn: y } or { c_crossattn: y }
         # JA: If we want to use both the concat condition and the hint condition, we have to make the
         # distinction here, resulting in three values in the dictionary to be returned.
-        c['c_control'] = [control_mask * control] # JA: control has a shape of (4, 3, 256, 256)
+        c['c_control'] = [torch.where(
+            torch.logical_or(also_control_dropout_mask, only_control_dropout_mask),
+            torch.zeros_like(control).to(control.device),
+            control
+        )] # JA: control has a shape of (4, 3, 256, 256)
         return x, c
 
     #MJ: called by p_losses() which is called by shared_step() which is called by training_step()

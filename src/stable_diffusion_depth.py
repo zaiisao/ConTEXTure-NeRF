@@ -263,7 +263,7 @@ class StableDiffusion(nn.Module):
     def img2img_step(self, text_embeddings, inputs, original_depth_mask, guidance_scale=100, strength=0.5,
                      num_inference_steps=50, update_mask=None, latent_mode=False, check_mask=None,
                      fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False, view_dir=None,
-                     front_image=None, phi=None, theta=None, condition_guiding_scales=None):
+                     front_image=None, phi=None, theta=None, condition_guidance_scales=None):
         # input is 1 3 512 512      # JA: inputs is cropped_rgb_render.detach()
         # depth_mask is 1 1 512 512
         # text_embeddings is 2 512 # JA: text_embeddings contains the single embedding for one of the six view prompts
@@ -440,42 +440,42 @@ class StableDiffusion(nn.Module):
                                     model_uncond_all = self.second_model.apply_model(latents, t, uc)
 
                                     # if not individual_control_of_conditions:
-                                    if condition_guiding_scales is None:
+                                    if condition_guidance_scales is None:
                                         model_t = self.second_model.apply_model(latents, t, cond)
                                         noise_pred = model_uncond_all + guidance_scale * (model_t - model_uncond_all)
                                     else:
-                                        model_uncond_crossattn = self.second_model.apply_model(latents, t, {
+                                        model_concat_control = self.second_model.apply_model(latents, t, {
                                             "c_crossattn": uc["c_crossattn"],
                                             "c_concat": cond["c_concat"],
                                             "c_control": cond["c_control"]
                                         })
 
-                                        model_uncond_concat = self.second_model.apply_model(latents, t, {
+                                        model_crossattn_control = self.second_model.apply_model(latents, t, {
                                             "c_crossattn": cond["c_crossattn"],
                                             "c_concat": uc["c_concat"],
                                             "c_control": cond["c_control"]
                                         })
 
-                                        model_uncond_control = self.second_model.apply_model(latents, t, {
+                                        model_crossattn_concat = self.second_model.apply_model(latents, t, {
                                             "c_crossattn": cond["c_crossattn"],
                                             "c_concat": cond["c_concat"],
                                             "c_control": uc["c_control"]
                                         })
 
-                                        guidance_scale_crossattn = condition_guiding_scales["guidance_scale_crossattn"]
-                                        guidance_scale_concat = condition_guiding_scales["guidance_scale_concat"]
-                                        guidance_scale_control = condition_guiding_scales["guidance_scale_control"]
+                                        guidance_scale_concat_control = condition_guidance_scales["concat_control"]
+                                        guidance_scale_crossattn_control = condition_guidance_scales["crossattn_control"]
+                                        guidance_scale_crossattn_concat = condition_guidance_scales["crossattn_concat"]
 
                                         # JA: Individual control of conditions
-                                        noise_pred_crossattn = guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
-                                        noise_pred_concat = guidance_scale_concat * (model_uncond_concat - model_uncond_all)
-                                        noise_pred_control = guidance_scale_control * (model_uncond_control - model_uncond_all)
+                                        noise_pred_crossattn = guidance_scale_concat_control * (model_concat_control - model_uncond_all)
+                                        noise_pred_concat = guidance_scale_crossattn_control * (model_crossattn_control - model_uncond_all)
+                                        noise_pred_control = guidance_scale_crossattn_concat * (model_crossattn_concat - model_uncond_all)
 
                                         noise_pred = model_uncond_all + noise_pred_crossattn + noise_pred_concat + noise_pred_control
 
-                                        # noise_pred = model_uncond_all + guidance_scale_concat * (model_uncond_concat - model_uncond_all)
-                                        #                               + guidance_scale_crossattn * (model_uncond_crossattn - model_uncond_all)
-                                        #                               + guidance_scale_control * (model_uncond_control - model_uncond_all)
+                                        # noise_pred = model_uncond_all + guidance_scale_concat_control * (model_concat_control - model_uncond_all)
+                                        #                               + guidance_scale_crossattn_control * (model_crossattn_control - model_uncond_all)
+                                        #                               + guidance_scale_crossattn_concat * (model_crossattn_concat - model_uncond_all)
 
                                         # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
                                         #            = a + CFG * (b - a)
