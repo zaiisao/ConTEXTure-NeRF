@@ -52,6 +52,7 @@ class GuideConfig:
     guidance_scale_crossattn: Optional[int] = None
     guidance_scale_concat: Optional[int] = None
     guidance_scale_control: Optional[int] = None
+    guidance_scale_all: Optional[int] = None
 
     guess_mode: Optional[bool] = False
     # Scale of mesh in 1x1x1 cube

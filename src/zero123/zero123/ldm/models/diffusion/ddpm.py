@@ -1499,6 +1499,7 @@ class LatentDiffusion(DDPM): # JA This is the latent diffusion class defined by 
             params = params + list(self.cc_projection.parameters())
             print('========== optimizing for cc projection weight ==========')
 
+        # JA: opt = torch.optim.AdamW(params, lr=lr)
         opt = torch.optim.AdamW([{"params": self.model.parameters(), "lr": lr},
                                 {"params": self.cc_projection.parameters(), "lr": 10. * lr}], lr=lr)
         if self.use_scheduler:

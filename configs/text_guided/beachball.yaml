@@ -1,15 +1,15 @@
 log:
-  exp_name: beachball_0123
+  exp_name: beachball_c0123
 guide:
   text: "a yellow smiley face beachball, solid color, smooth, high quality, hd, {} view"
   append_direction: True
   shape_path: shapes/sphere.obj
-  second_model_type: "zero123"
+  second_model_type: "control_zero123"
 
   individual_control_of_conditions: True
-  guidance_scale_crossattn: 5
-  guidance_scale_concat: 3
-  guidance_scale_control: 1
+  guidance_scale_crossattn: 10
+  guidance_scale_concat: 10
+  guidance_scale_control: 6
 
   # guess_mode: False
   guidance_scale: 10

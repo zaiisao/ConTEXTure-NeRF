@@ -309,7 +309,7 @@ class ControlNet(nn.Module):
 
         return outs
 
-
+# JA: LatentDiffusion is defined by Zero123 and different from the default SD LatentDiffusion
 class ControlLDM(LatentDiffusion):
 
     def __init__(self, control_stage_config, control_key, only_mid_control, *args, **kwargs):
@@ -319,15 +319,8 @@ class ControlLDM(LatentDiffusion):
         self.only_mid_control = only_mid_control
         self.control_scales = [1.0] * 13
 
-    def is_between(self, values, multiplier1=None, multiplier2=None):
-        if multiplier1 is None and multiplier2 is not None:
-            return values < self.condition_dropout * multiplier2
-        elif multiplier1 is not None and multiplier2 is None:
-            return values >= self.condition_dropout * multiplier1
-
-        assert multiplier1 is not None and multiplier2 is not None
-
-        return torch.logical_and(values >= self.condition_dropout * multiplier1, values < self.condition_dropout * multiplier2)
+    def is_between(self, values, start=0, finish=1):
+        return torch.logical_and(values >= start, values < finish)
 
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs): # JA: Override get_input of LatentDiffusion (Zero123 version)
@@ -343,13 +336,18 @@ class ControlLDM(LatentDiffusion):
         # input_mask = 1 - rearrange((random >= self.condition_dropout).float() * (random < 3 * self.condition_dropout).float(), "n -> n 1 1 1") # 0.05 < random < 3*0.05
 
         # JA:
-        # |0.15       0.30       0.45       0.60                     1.00
-        # |           111111111112222222222233333333333123123123123123123
-        # |ALL UNCOND|JUST CA   |JUST CC   |JUST CT   |ALL COND
+        # |0.00       0.15       0.30       0.45       0.60                          1.00
+        # |           111111111112222222222233333333333123123123123123123123123123123
+        # |ALL UNCOND|JUST CA   |JUST CC   |JUST CT   |ALL COND                      |
 
-        crossattn_mask = rearrange(torch.logical_or(self.is_between(random, None, 1), self.is_between(random, 2, 4)), "n -> n 1 1")  #MJ: condition_dropout = 0.05 = 5%; 0< random < 0.05*2
-        concat_mask = rearrange(~torch.logical_or(self.is_between(random, None, 2), self.is_between(random, 3, 4)), "n -> n 1 1 1") # 0.05 < random < 3*0.05
-        control_mask = rearrange(self.is_between(random, None, 3), "n -> n 1 1 1")
+        crossattn_only_range = self.is_between(random, self.condition_dropout, self.condition_dropout * 2)
+        concat_only_range = self.is_between(random, self.condition_dropout * 2, self.condition_dropout * 3)
+        control_only_range = self.is_between(random, self.condition_dropout * 3, self.condition_dropout * 4)
+        all_cond_range = self.is_between(random, self.condition_dropout * 4, 1)
+
+        crossattn_all_cond_mask = rearrange(torch.logical_or(crossattn_only_range, all_cond_range), "n -> n 1 1")
+        concat_all_cond_mask = rearrange(torch.logical_or(concat_only_range, all_cond_range), "n -> n 1 1")
+        control_all_cond_mask = rearrange(torch.logical_or(control_only_range, all_cond_range), "n -> n 1 1")
 
         null_prompt = self.get_learned_conditioning([""])
 
@@ -358,9 +356,12 @@ class ControlLDM(LatentDiffusion):
         with torch.enable_grad():
             clip_emb = self.get_learned_conditioning(xc).detach()
             null_prompt = self.get_learned_conditioning([""]).detach()
-            cond["c_crossattn"] = [self.cc_projection(torch.cat([torch.where(crossattn_mask, null_prompt, clip_emb), T[:, None, :]], dim=-1))]
+            cond["c_crossattn"] = [self.cc_projection(torch.cat([
+                torch.where(crossattn_all_cond_mask, clip_emb, null_prompt),
+                T[:, None, :]
+            ], dim=-1))] # crossattn is within enable_grad because we need to update the parameters in cc_projection = nn.Linear(772, 768)
             
-        cond["c_concat"] = [concat_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
+        cond["c_concat"] = [concat_all_cond_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
 
         control = batch[self.control_key] # JA: control_key is hint
         if bs is not None:
@@ -373,9 +374,9 @@ class ControlLDM(LatentDiffusion):
         # JA: If we want to use both the concat condition and the hint condition, we have to make the
         # distinction here, resulting in three values in the dictionary to be returned.
         cond['c_control'] = [torch.where(
-            control_mask,
-            torch.zeros_like(control).to(control.device),
-            control
+            control_all_cond_mask,
+            control,
+            torch.zeros_like(control).to(control.device)
         )] # JA: control has a shape of (4, 3, 256, 256)
         return x, cond
 
@@ -581,7 +582,7 @@ class ControlLDM(LatentDiffusion):
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.control_model.parameters())
-        if not self.sd_locked:
+        if not self.sd_locked: # JA: self.sd_locked is True by default; therefore, we only include the parameters of ControlNet
             params += list(self.model.diffusion_model.output_blocks.parameters())
             params += list(self.model.diffusion_model.out.parameters())
         opt = torch.optim.AdamW(params, lr=lr)

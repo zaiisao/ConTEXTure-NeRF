@@ -300,12 +300,20 @@ class TEXTure:
             assert self.cfg.guide.guidance_scale_crossattn is not None
             assert self.cfg.guide.guidance_scale_concat is not None
             assert self.cfg.guide.guidance_scale_control is not None
+            assert self.cfg.guide.guidance_scale_all is not None
 
             condition_guidance_scales = {
                 "crossattn": self.cfg.guide.guidance_scale_crossattn,
                 "concat": self.cfg.guide.guidance_scale_concat,
                 "control": self.cfg.guide.guidance_scale_control,
+                "all": self.cfg.guide.guidance_scale_all,
             }
+        elif self.cfg.guide.guidance_scale_all is not None:
+            # JA: We will use this option to allow a separate guidance scale from the main depth pipeline scale
+            condition_guidance_scales = {
+                "all": self.cfg.guide.guidance_scale_all
+            }
+
 
         # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
         # In the original implementation of TEXTure, the view direction information is contained in text_z. In
