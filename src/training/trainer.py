@@ -297,16 +297,12 @@ class TEXTure:
             if self.cfg.guide.second_model_type != "control_zero123":
                 raise NotImplementedError
 
-            assert self.cfg.guide.guidance_scale_crossattn is not None
-            assert self.cfg.guide.guidance_scale_concat is not None
-            assert self.cfg.guide.guidance_scale_control is not None
-            assert self.cfg.guide.guidance_scale_all is not None
+            assert self.cfg.guide.guidance_scale_i is not None
+            assert self.cfg.guide.guidance_scale_t is not None
 
             condition_guidance_scales = {
-                "crossattn": self.cfg.guide.guidance_scale_crossattn,
-                "concat": self.cfg.guide.guidance_scale_concat,
-                "control": self.cfg.guide.guidance_scale_control,
-                "all": self.cfg.guide.guidance_scale_all,
+                "i": self.cfg.guide.guidance_scale_i,
+                "t": self.cfg.guide.guidance_scale_t
             }
         elif self.cfg.guide.guidance_scale_all is not None:
             # JA: We will use this option to allow a separate guidance scale from the main depth pipeline scale

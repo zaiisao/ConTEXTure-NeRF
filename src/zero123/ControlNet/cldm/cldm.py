@@ -335,19 +335,12 @@ class ControlLDM(LatentDiffusion):
         # prompt_mask = rearrange(random >= self.condition_dropout and random < 2 * self.condition_dropout, "n -> n 1 1")  #MJ: condition_dropout = 0.05 = 5%; 0< random < 0.05*2
         # input_mask = 1 - rearrange((random >= self.condition_dropout).float() * (random < 3 * self.condition_dropout).float(), "n -> n 1 1 1") # 0.05 < random < 3*0.05
 
-        # JA:
-        # |0.00       0.15       0.30       0.45       0.60                          1.00
-        # |           111111111112222222222233333333333123123123123123123123123123123
-        # |ALL UNCOND|JUST CA   |JUST CC   |JUST CT   |ALL COND                      |
+        crossattn_only_range = self.is_between(random, 0, self.condition_dropout)
+        control_only_range = self.is_between(random, self.condition_dropout * 2, self.condition_dropout * 3)
+        all_cond_range = self.is_between(random, self.condition_dropout * 3, 1)
 
-        crossattn_only_range = self.is_between(random, self.condition_dropout, self.condition_dropout * 2)
-        concat_only_range = self.is_between(random, self.condition_dropout * 2, self.condition_dropout * 3)
-        control_only_range = self.is_between(random, self.condition_dropout * 3, self.condition_dropout * 4)
-        all_cond_range = self.is_between(random, self.condition_dropout * 4, 1)
-
-        crossattn_all_cond_mask = rearrange(torch.logical_or(crossattn_only_range, all_cond_range), "n -> n 1 1")
-        concat_all_cond_mask = rearrange(torch.logical_or(concat_only_range, all_cond_range), "n -> n 1 1")
-        control_all_cond_mask = rearrange(torch.logical_or(control_only_range, all_cond_range), "n -> n 1 1")
+        crossattn_mask = rearrange(torch.logical_or(crossattn_only_range, all_cond_range), "n -> n 1 1")
+        control_mask = rearrange(torch.logical_or(control_only_range, all_cond_range), "n -> n 1 1 1")
 
         null_prompt = self.get_learned_conditioning([""])
 
@@ -357,11 +350,11 @@ class ControlLDM(LatentDiffusion):
             clip_emb = self.get_learned_conditioning(xc).detach()
             null_prompt = self.get_learned_conditioning([""]).detach()
             cond["c_crossattn"] = [self.cc_projection(torch.cat([
-                torch.where(crossattn_all_cond_mask, clip_emb, null_prompt),
+                torch.where(crossattn_mask, clip_emb, null_prompt),
                 T[:, None, :]
             ], dim=-1))] # crossattn is within enable_grad because we need to update the parameters in cc_projection = nn.Linear(772, 768)
             
-        cond["c_concat"] = [concat_all_cond_mask * self.encode_first_stage((xc.to(self.device))).mode().detach()]
+        cond["c_concat"] = [self.encode_first_stage((xc.to(self.device))).mode().detach()]
 
         control = batch[self.control_key] # JA: control_key is hint
         if bs is not None:
@@ -374,7 +367,7 @@ class ControlLDM(LatentDiffusion):
         # JA: If we want to use both the concat condition and the hint condition, we have to make the
         # distinction here, resulting in three values in the dictionary to be returned.
         cond['c_control'] = [torch.where(
-            control_all_cond_mask,
+            control_mask,
             control,
             torch.zeros_like(control).to(control.device)
         )] # JA: control has a shape of (4, 3, 256, 256)
