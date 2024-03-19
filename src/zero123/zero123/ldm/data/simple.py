@@ -278,7 +278,7 @@ class ObjaverseData(Dataset):
         theta_target, azimuth_target, z_target = self.cartesian_to_spherical(T_target[None, :])
         
         d_theta = theta_target - theta_cond
-        d_azimuth = (azimuth_target - azimuth_cond) % (2 * math.pi)
+        d_azimuth = (azimuth_target - azimuth_cond) % (2 * math.pi) # modulo 2pi d_azimuth ranges from 0 to 2pi
         d_z = z_target - z_cond
         
         d_T = torch.tensor([d_theta.item(), math.sin(d_azimuth.item()), math.cos(d_azimuth.item()), d_z.item()])

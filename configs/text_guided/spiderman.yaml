@@ -1,5 +1,5 @@
 log:
-  exp_name: spiderman_5_5
+  exp_name: spiderman_5_3_negprompt
 guide:
   text: "A photo of Spiderman, {} view"
   append_direction: True
@@ -9,7 +9,9 @@ guide:
 
   individual_control_of_conditions: True
   guidance_scale_i: 5
-  guidance_scale_t: 5
+  guidance_scale_t: 3
 
-  guess_mode: True
-  use_inpainting: False
+  # guess_mode: True
+  # use_inpainting: False
+# render:
+#   n_views: 18

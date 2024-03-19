@@ -61,8 +61,8 @@ cam.data.lens = 35
 cam.data.sensor_width = 32
 
 cam_constraint = cam.constraints.new(type="TRACK_TO")
-cam_constraint.track_axis = "TRACK_NEGATIVE_Z"
-cam_constraint.up_axis = "UP_Y"
+cam_constraint.track_axis = "TRACK_NEGATIVE_Z" # JA: The camera view vector is the negative Z of the world coordinate system
+cam_constraint.up_axis = "UP_Y" # JA: The up vector of the camera is UP_Y (the Y axis of the world coordinate system)
 
 # setup lighting
 bpy.ops.object.light_add(type="AREA")

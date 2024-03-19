@@ -83,6 +83,8 @@ def load_model_from_config(config, ckpt, device, verbose=False):
 @torch.no_grad()
 def sample_model(input_im, depth_map_im, model, sampler, precision, h, w, ddim_steps, n_samples, scale,
                  ddim_eta, x, y, z, guess_mode): # JA: h, w are each fixed as 256
+                 # JA: x, y, z is polar, azimuth, radius respectively
+
     precision_scope = autocast if precision == 'autocast' else nullcontext
     with precision_scope('cuda'):
         with model.ema_scope():
@@ -105,19 +107,23 @@ def sample_model(input_im, depth_map_im, model, sampler, precision, h, w, ddim_s
              # = a condensed representation of the image in the form of a one-dimensional  vector; its shape =[768]
             T = torch.tensor([math.radians(x), math.sin(                        # 768 is the dimension of the CLIP image encoding vector
                 math.radians(y)), math.cos(math.radians(y)), z])
-            
-        #MJ: ChatGPT: The new representation (theta, sin(phi), cos(phi), r) does contain all the information necessary to describe a point (theta, phi, r) in 3D space 
-        # in spherical coordinates. The azimuthal angle phi ϕ can be reconstructed from sin(phi) and cos(phi) 
-        # although care must be taken to correctly determine the quadrant of ϕ. Theta and r are directly included,
-        # they correspond one-to-one with their counterparts in the standard spherical coordinates.
-            
-        #Stability and Precision:
-        #      Representing angles in terms of their sine and cosine might also provide numerical stability in certain calculations.
-        #      Trigonometric functions can behave more predictably, especially for small angles, compared to dealing directly with angles.
-        #Specific Algorithmic Requirements:
+            # JA: The camera position has the coordinates of (theta, phi, r) but for some computational purpose, it is
+            # transformed to (theta, sin(phi), cos(phi), r). Both representations are equivalent.
 
-        #     Certain algorithms might inherently work better with components of vectors (like sin(phi) and cos(phi)
-        #     instead of angles. For instance, in some machine learning models, neural networks might find it easier to process and learn from these normalized values.
+            # It may be that the camera viewpoint for the reference cond image is equal to (theta, phi, r) = (0, 0, r0)
+            
+            #MJ: ChatGPT: The new representation (theta, sin(phi), cos(phi), r) does contain all the information necessary to describe a point (theta, phi, r) in 3D space 
+            # in spherical coordinates. The azimuthal angle phi ϕ can be reconstructed from sin(phi) and cos(phi) 
+            # although care must be taken to correctly determine the quadrant of ϕ. Theta and r are directly included,
+            # they correspond one-to-one with their counterparts in the standard spherical coordinates.
+                
+            #Stability and Precision:
+            #      Representing angles in terms of their sine and cosine might also provide numerical stability in certain calculations.
+            #      Trigonometric functions can behave more predictably, especially for small angles, compared to dealing directly with angles.
+            #Specific Algorithmic Requirements:
+
+            #     Certain algorithms might inherently work better with components of vectors (like sin(phi) and cos(phi)
+            #     instead of angles. For instance, in some machine learning models, neural networks might find it easier to process and learn from these normalized values.
 
             T = T[None, None, :].repeat(n_samples, 1, 1).to(c.device) # JA: The shape of T is [B, 1, 4]
             c = torch.cat([c, T], dim=-1) # JA: Concatenate the last two dimensions of c and T. The result of c has a shape of [B, 1, 772]
@@ -376,6 +382,8 @@ def main_run(models, device, cam_vis, return_what,
     '''
     :param raw_im (PIL Image).
     '''
+
+    # JA: x, y, z is polar, azimuth, radius respectively
     
     raw_im.thumbnail([1536, 1536], Image.Resampling.LANCZOS)
     safety_checker_input = models['clip_fe'](raw_im, return_tensors='pt').to(device)
