@@ -269,7 +269,8 @@ class TEXTure:
         # Crop to inner region based on object mask
         min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-        cropped_rgb_render = crop(rgb_render) # JA: In our experiment, 1200 is cropped to 827
+        cropped_rgb_render = crop(rgb_render) # JA: This is rendered image which is denoted as Q_0.
+                                              # In our experiment, 1200 is cropped to 827
         cropped_depth_render = crop(depth_render)
         cropped_update_mask = crop(update_mask)
         self.log_train_image(cropped_rgb_render, name='cropped_input')
@@ -304,12 +305,6 @@ class TEXTure:
                 "i": self.cfg.guide.guidance_scale_i,
                 "t": self.cfg.guide.guidance_scale_t
             }
-        elif self.cfg.guide.guidance_scale_all is not None:
-            # JA: We will use this option to allow a separate guidance scale from the main depth pipeline scale
-            condition_guidance_scales = {
-                "all": self.cfg.guide.guidance_scale_all
-            }
-
 
         # JA: Compute target image corresponding to the specific viewpoint, i.e. front, left, right etc. image
         # In the original implementation of TEXTure, the view direction information is contained in text_z. In
@@ -356,17 +351,28 @@ class TEXTure:
                                                z_normals_cache=z_normals_cache)
         self.log_train_image(fitted_pred_rgb, name='fitted')
 
-        if self.view_dirs[dirs] == "front":
-            # JA: Zero123 needs the input image without the background
-            # rgb_output is the generated and uncropped image in pixel space
-            self.zero123_front_input = crop(
-                rgb_output * object_mask
-                + torch.ones_like(rgb_output, device=self.device) * (1 - object_mask)
-            )   # JA: In the case of front view, the shape is (930,930).
-                # This rendered image will be compressed to the shape of (512, 512) which is the shape of the diffusion
-                # model.
+        # JA: Zero123 needs the input image without the background
+        # rgb_output is the generated and uncropped image in pixel space
+        zero123_input = crop(
+            rgb_output * object_mask
+            + torch.ones_like(rgb_output, device=self.device) * (1 - object_mask)
+        )   # JA: In the case of front view, the shape is (930,930).
+            # This rendered image will be compressed to the shape of (512, 512) which is the shape of the diffusion
+            # model.
 
-            self.log_train_image(self.zero123_front_input, name='zero123_front_input')
+        if self.view_dirs[dirs] == "front":
+            self.zero123_front_input = zero123_input
+        
+        # if self.zero123_inputs is None:
+        #     self.zero123_inputs = []
+        
+        # self.zero123_inputs.append({
+        #     'image': zero123_input,
+        #     'phi': data['phi'],
+        #     'theta': data['theta']
+        # })
+
+        self.log_train_image(zero123_input, name='zero123_input')
 
         return
 

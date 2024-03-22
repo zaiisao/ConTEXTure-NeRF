@@ -363,7 +363,8 @@ class TexturedMeshModel(nn.Module):
         if use_meta_texture: # JA: During training of the network, we either learn meta texture or texture
             texture_img = self.meta_texture_img
         else:
-            texture_img = self.texture_img
+            texture_img = self.texture_img  # JA: texture_img is the render image which is actually the
+                                            # learnable texture atlas
 
         if self.augmentations:
             augmented_vertices = self.augment_vertices()

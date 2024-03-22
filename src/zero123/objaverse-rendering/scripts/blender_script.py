@@ -65,9 +65,13 @@ cam_constraint.track_axis = "TRACK_NEGATIVE_Z" # JA: The camera view vector is t
 cam_constraint.up_axis = "UP_Y" # JA: The up vector of the camera is UP_Y (the Y axis of the world coordinate system)
 
 # setup lighting
-bpy.ops.object.light_add(type="AREA")
-light2 = bpy.data.lights["Area"]
+bpy.ops.object.light_add(type="AREA") # JA: Add an area light to the scene
+light2 = bpy.data.lights["Area"] # JA: light2 refers to the area light
 light2.energy = 3000
+
+# While bpy.data.lights["Area"] and bpy.data.objects["Area"] access different properties (the former accesses properties
+# of the light source itself, and the latter accesses properties of the light object's transformation in the scene),
+# they both refer to the same physical entity in your Blender project.
 bpy.data.objects["Area"].location[2] = 0.5
 bpy.data.objects["Area"].scale[0] = 100
 bpy.data.objects["Area"].scale[1] = 100
@@ -127,9 +131,9 @@ def sample_spherical(radius_min=1.5, radius_max=2.0, maxz=1.6, minz=-0.75):
     return vec
 
 def randomize_camera():
-    elevation = random.uniform(0., 90.)
-    azimuth = random.uniform(0., 360)
-    distance = random.uniform(0.8, 1.6)
+    elevation = random.uniform(0., 90.) # JA: Elevation is theta
+    azimuth = random.uniform(0., 360) # JA: Azimuth is phi
+    distance = random.uniform(0.8, 1.6) # JA: Distance means r coordinate of the camera
     return set_camera_location(elevation, azimuth, distance)
 
 def set_camera_location(elevation, azimuth, distance):
@@ -138,16 +142,21 @@ def set_camera_location(elevation, azimuth, distance):
     camera = bpy.data.objects["Camera"]
     camera.location = x, y, z
 
-    direction = - camera.location
+    direction = - camera.location   # JA: -camera.location represents the camera direction for the origin of the world
+                                    # coordinate system
     rot_quat = direction.to_track_quat('-Z', 'Y')
     camera.rotation_euler = rot_quat.to_euler()
     return camera
 
 def randomize_lighting() -> None:
     light2.energy = random.uniform(300, 600)
+    # JA: In Blender, the units used for object locations (including the position of lights, cameras, and meshes) are
+    # based on Blender's unit system, which by default is equivalent to meters
     bpy.data.objects["Area"].location[0] = random.uniform(-1., 1.)
     bpy.data.objects["Area"].location[1] = random.uniform(-1., 1.)
-    bpy.data.objects["Area"].location[2] = random.uniform(0.5, 1.5)
+    bpy.data.objects["Area"].location[2] = random.uniform(0.5, 1.5) # JA: The z location of the light is always positive
+                                                                    # It means it is always on one side of the world
+                                                                    # coordinate system with respect to the origin
 
 
 def reset_lighting() -> None:
@@ -275,8 +284,15 @@ def save_images(object_file: str) -> None:
     scene.collection.objects.link(empty)
     cam_constraint.target = empty
 
-    randomize_lighting()
-    for i in range(args.num_images):
+    randomize_lighting()    # JA: Suppose we have eight images of a shape rendered with eight different viewpoints. If
+                            # the light direction is fixed, we can infer where the light direction lies from inspecting
+                            # the eight images. But if we randomize the light direction, we cannot infer where the
+                            # light direction is by inspecting the rendered images.
+                            # JA: It means it is always on one side of the world coordinate system with respect to the
+                            # origin. The area light location is randomized but not fully; z location of the light is
+                            # always positive.
+
+    for i in range(args.num_images): # JA: num_images is the number of images to be rendered per object and is set to 8
         # # set the camera position
         # theta = (i / args.num_images) * math.pi * 2
         # phi = math.radians(60)
@@ -289,7 +305,7 @@ def save_images(object_file: str) -> None:
         # cam.location = point
 
         # set camera
-        camera = randomize_camera()
+        camera = randomize_camera() # JA: Camera position is fully randomized with r between 0.8 and 1.6 (meters)
 
         scene.use_nodes = True
         tree = scene.node_tree

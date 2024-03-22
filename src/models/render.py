@@ -97,7 +97,12 @@ class Renderer:
         mask = (face_idx > -1).float()[..., None]
 
         image_features = kal.render.mesh.texture_mapping(uv_features, texture_map, mode=self.interpolation_mode)
-        image_features = image_features * mask
+                        # JA: Interpolates texture_maps by dense or sparse texture_coordinates (uv_features).
+                        # This function supports sampling texture coordinates for:
+                        # 1. An entire 2D image
+                        # 2. A sparse point cloud of texture coordinates.
+
+        image_features = image_features * mask # JA: image_features refers to the render image
         if background_type == 'white':
             image_features += 1 * (1 - mask)
         elif background_type == 'random':
