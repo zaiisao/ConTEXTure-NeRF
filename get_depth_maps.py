@@ -271,6 +271,9 @@ for pair in pairs:
         path = os.path.join(os.getcwd(), "texfusion_dataset", pair["path"])
         print(os.path.isfile(path))
 
+            # depth_render = outputs['depth']
+            # print(depth_render)
+            # torchvision.utils.save_image(depth_render, "./test.png")
 
 # for mesh_path in mesh_paths:
 #     with tempfile.NamedTemporaryFile(mode='w+') as fp:

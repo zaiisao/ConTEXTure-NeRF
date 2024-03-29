@@ -48,7 +48,7 @@ if __name__ == '__main__':
 
     # # Misc
     # dataset = ObjaverseData(
-    #     "/home/jaehoon/.objaverse/hf-objaverse-v1/views_whole_sphere",
+    #     "./.objaverse/hf-objaverse-v1/views_whole_sphere",
     #     total_view=4, validation=False, image_transforms=image_transforms)
 
     # dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=True)
@@ -75,8 +75,7 @@ if __name__ == '__main__':
         precision=32,
         callbacks=[logger, checkpoint_callback],
         num_nodes=1,
-        strategy="ddp"#,
-        # resume_from_checkpoint="/home/jaehoon/repos/zero123/ControlNet/lightning_logs/version_66/checkpoints/epoch=0-step=174.ckpt"
+        strategy="ddp"
     )
 
     # Train!
