@@ -10,3 +10,4 @@ logs/*
 *.ckpt
 experiments/
 cache/
+texfusion_dataset/
