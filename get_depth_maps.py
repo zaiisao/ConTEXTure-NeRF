@@ -39,6 +39,6 @@ guide:
 
             depth_render = outputs['depth']
             print(depth_render)
-            torchvision.utils.save_image(depth_render, "/home/jaehoon/test.png")
+            torchvision.utils.save_image(depth_render, "./test.png")
 
         main()
