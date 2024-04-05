@@ -450,42 +450,42 @@ class StableDiffusion(nn.Module):
 
 
                                     # if not individual_control_of_conditions:
-                                    # if condition_guidance_scales is None or not 'i' in condition_guidance_scales.keys():
-                                    #     zero123_guidance_scale = condition_guidance_scales["all"]
-                                    #     model_uncond_all = self.second_model.apply_model(latents, t, uc)
-                                    #     model_t = self.second_model.apply_model(latents, t, cond)
-                                    #     noise_pred = model_uncond_all + zero123_guidance_scale * (model_t - model_uncond_all)
-                                    # else:
-                                    model_concat_control_no_crossattn = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": uc["c_crossattn"],
-                                        "c_concat": cond["c_concat"],
-                                        "c_control": cond["c_control"]
-                                    })
+                                    if condition_guidance_scales is None:
+                                        zero123_guidance_scale = 3#condition_guidance_scales["all"]
+                                        model_uncond_all = self.second_model.apply_model(latents, t, uc)
+                                        model_t = self.second_model.apply_model(latents, t, cond)
+                                        noise_pred = model_uncond_all + zero123_guidance_scale * (model_t - model_uncond_all)
+                                    else:
+                                        model_concat_control_no_crossattn = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": uc["c_crossattn"],
+                                            "c_concat": cond["c_concat"],
+                                            "c_control": cond["c_control"]
+                                        })
 
-                                    model_concat_no_control_no_crossattn = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": uc["c_crossattn"],
-                                        "c_concat": cond["c_concat"],
-                                        "c_control": uc["c_control"]
-                                    })
+                                        model_concat_no_control_no_crossattn = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": uc["c_crossattn"],
+                                            "c_concat": cond["c_concat"],
+                                            "c_control": uc["c_control"]
+                                        })
 
-                                    model_concat_control_crossattn = self.second_model.apply_model(latents, t, {
-                                        "c_crossattn": cond["c_crossattn"],
-                                        "c_concat": cond["c_concat"],
-                                        "c_control": cond["c_control"]
-                                    })
+                                        model_concat_control_crossattn = self.second_model.apply_model(latents, t, {
+                                            "c_crossattn": cond["c_crossattn"],
+                                            "c_concat": cond["c_concat"],
+                                            "c_control": cond["c_control"]
+                                        })
 
-                                    guidance_i = condition_guidance_scales["i"]
-                                    guidance_t = condition_guidance_scales["t"]
+                                        guidance_i = condition_guidance_scales["i"]
+                                        guidance_t = condition_guidance_scales["t"]
 
-                                    noise_pred = model_concat_no_control_no_crossattn \
-                                        + guidance_i * (model_concat_control_no_crossattn - model_concat_no_control_no_crossattn) \
-                                        + guidance_t * (model_concat_control_crossattn - model_concat_control_no_crossattn)
+                                        noise_pred = model_concat_no_control_no_crossattn \
+                                            + guidance_i * (model_concat_control_no_crossattn - model_concat_no_control_no_crossattn) \
+                                            + guidance_t * (model_concat_control_crossattn - model_concat_control_no_crossattn)
 
-                                    # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
-                                    #            = a + CFG * (b - a)
+                                        # noise_pred = model_uncond + guidance_scale_all * (model_t - model_uncond)
+                                        #            = a + CFG * (b - a)
 
-                                    # model_uncond = the unconditional prediction with all three conditions set to None
-                                    # model_uncond_concat = the unconditional prediction with only concat condition set to None
+                                        # model_uncond = the unconditional prediction with all three conditions set to None
+                                        # model_uncond_concat = the unconditional prediction with only concat condition set to None
 
                     # compute the previous noisy sample x_t -> x_t-1
 
@@ -502,7 +502,7 @@ class StableDiffusion(nn.Module):
                         intermediate_results.append(image)
 
                     # JA: Denoise one step. This is applied for every pipeline at each iteration
-                    latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
+                    latents = self.scheduler.step(noise_pred, t, latents)['prev_sample'] # return x_prev, pred_x0
 
             return latents
         # JA: end of sample function

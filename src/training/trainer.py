@@ -97,6 +97,8 @@ class TEXTure:
             text_string = []
             for d in self.view_dirs:
                 text = ref_text.format(d)
+                if d != 'front':
+                    text = "" # JA: For all non-frontal views, we wish to use a null string prompt
                 text_string.append(text)
                 logger.info(text)
                 negative_prompt = None

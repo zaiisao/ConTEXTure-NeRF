@@ -1,18 +1,18 @@
 log:
-  exp_name: spongebob_c0123_3_3_3
+  exp_name: spongebob_puredepth #_c0123_3_3_3
 guide:
   text: "A photo of Spongebob, {} view"
   append_direction: True
   shape_path: shapes/spongebob.obj
   guidance_scale: 10
-  second_model_type: "control_zero123"
+  # second_model_type: "control_zero123"
 
-  individual_control_of_conditions: True
-  guidance_scale_crossattn: 3
-  guidance_scale_concat: 3
-  guidance_scale_control: 3
+  # individual_control_of_conditions: True
+  # guidance_scale_crossattn: 3
+  # guidance_scale_concat: 3
+  # guidance_scale_control: 3
 
-  guess_mode: False
+  # guess_mode: False
   # use_inpainting: False
 # optim:
 #   seed: 3

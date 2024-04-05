@@ -89,7 +89,7 @@ def load_and_preprocess(interface, input_im):
     image = add_margin(image, (255, 255, 255), size=256)
     image = np.array(image)
     
-    return image
+    return image, est_seg
 
 
 def log_txt_as_img(wh, xc, size=10):

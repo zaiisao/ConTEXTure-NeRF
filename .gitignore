@@ -11,3 +11,8 @@ logs/*
 experiments/
 cache/
 texfusion_dataset/
+texture_test/
+src/zero123/CLIP/
+src/zero123/taming-transformers/
+render_dataset/
+midas_models/

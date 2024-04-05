@@ -280,7 +280,7 @@ class TexturedMeshModel(nn.Module):
             chart_options = xatlas.ChartOptions()
             chart_options.max_iterations = 4
             atlas.generate(chart_options=chart_options)
-            vmapping, ft_np, vt_np = atlas[0]  # [N], [M, 3], [N, 2]
+            vmapping, ft_np, vt_np = atlas[0]  # [N], [M, 3], [N, 2] # JA: vt stores texture UV coordinates for each vertex. ft stores indices to the UV array for each face.
 
             vt = torch.from_numpy(vt_np.astype(np.float32)).float().cuda()
             ft = torch.from_numpy(ft_np.astype(np.int64)).int().cuda()
