@@ -8,11 +8,11 @@ from src.configs.train_config import TrainConfig
 sys.path.append("./src/zero123/zero123")
 sys.path.append("./src/zero123/ControlNet")
 
-for i in reversed(range(3, 7)):
-  for t in reversed(range(1, 11)):
+for i in reversed(range(1, 8, 2)):
+  for t in reversed(range(1, 8, 2)):
     with tempfile.NamedTemporaryFile(mode='w+') as fp:
       fp.write(f"""log:
-  exp_name: spiderman_{i}_{t}
+  exp_name: spiderman_c0123_{i}_{t}
 guide:
   text: "A photo of Spiderman, {'{}'} view"
   append_direction: True

@@ -8,7 +8,8 @@ class Renderer:
     def __init__(self, device, dim=(224, 224), interpolation_mode='nearest'):
         assert interpolation_mode in ['nearest', 'bilinear', 'bicubic'], f'no interpolation mode {interpolation_mode}'
 
-        camera = kal.render.camera.generate_perspective_projection(np.pi / 3).to(device)
+        camera = kal.render.camera.generate_perspective_projection(np.pi / 3).to(device) # JA: This is the field of view
+                                                                                        # It is currently set to 60deg.
 
         self.device = device
         self.interpolation_mode = interpolation_mode

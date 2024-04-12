@@ -85,8 +85,8 @@ def load_and_preprocess(interface, input_im):
     image = PIL.Image.fromarray(np.array(image))
     
     # resize image such that long edge is 512
-    image.thumbnail([200, 200], Image.Resampling.LANCZOS)
-    image = add_margin(image, (255, 255, 255), size=256)
+    image.thumbnail([400, 400], Image.Resampling.LANCZOS)
+    image = add_margin(image, (255, 255, 255), size=512)
     image = np.array(image)
     
     return image, est_seg

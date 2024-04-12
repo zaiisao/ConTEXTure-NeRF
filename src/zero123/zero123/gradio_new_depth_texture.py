@@ -348,7 +348,7 @@ def preprocess_image(models, input_im, preprocess):
     start_time = time.time()
 
     if preprocess:
-        input_im = load_and_preprocess(models['carvekit'], input_im)
+        input_im, _ = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
         # (H, W, 3) array in [0, 1].
     else:

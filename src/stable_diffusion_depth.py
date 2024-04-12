@@ -112,12 +112,12 @@ class StableDiffusion(nn.Module):
         self,
         cond_image,
         depth_map,
-        x, y, z=1.0,
+        x, y, z=0.7,
         n_samples=1,
         scale=1.0,
         use_control=True
     ):
-        # JA: x = phi (relative azimuth), y = theta (relative elevation), z = radius
+        # JA: x = theta (relative elevation), y = phi (relative azimuth), z = radius
         # The reference view is the front view (phi, theta) = (0, 60)
 
         # JA: The following code is from gradio_new_depth_texture.py
@@ -129,8 +129,8 @@ class StableDiffusion(nn.Module):
 
         # Added by JA:
         # Zero123 was trained with the azimuth angle [-pi, pi], but TEXTure uses [0, 2pi].
-        if x > math.pi:
-            x -= 2 * math.pi
+        if y > math.pi:
+            y -= 2 * math.pi
 
         T = torch.tensor([x, math.sin(y), math.cos(y), z])
 
@@ -365,9 +365,9 @@ class StableDiffusion(nn.Module):
 
                             torchvision.utils.save_image(self.decode_latents(latents), f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_latents_before.png")
                             torchvision.utils.save_image(self.decode_latents(noised_truth), f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_noised_truth.png")
-                            torchvision.utils.save_image(F.interpolate(curr_mask, size=(512, 512))[0], f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_curr_mask.png")
+                            torchvision.utils.save_image(F.interpolate(curr_mask, size=(image_size, image_size))[0], f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_curr_mask.png")
                             # torchvision.utils.save_image(F.interpolate(original_depth_mask, size=(512, 512))[0], f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_depth_mask.png")
-                            torchvision.utils.save_image(pred_rgb_512, f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_pred_rgb_512.png")
+                            torchvision.utils.save_image(pred_rgb_small, f"./texture_test/{round(math.degrees(phi))}_{round(math.degrees(theta))}_{i}_pred_rgb_512.png")
 
                             # JA: This blend operation is executed for the traditional depth pipeline and the zero123 pipeline
                             latents = latents * curr_mask + noised_truth * (1 - curr_mask)
@@ -427,9 +427,9 @@ class StableDiffusion(nn.Module):
                             use_control = self.second_model_type == "control_zero123"
 
                             cond, uc = self.get_zero123_inputs(
-                                F.interpolate(front_image, size=(512, 512)),
-                                F.interpolate(original_depth_mask, size=(512, 512))[0],
-                                phi, theta,
+                                F.interpolate(front_image, size=(image_size, image_size)),
+                                F.interpolate(original_depth_mask, size=(image_size, image_size))[0],
+                                theta, phi,
                                 scale=guidance_scale,
                                 use_control=use_control
                             )
@@ -507,7 +507,12 @@ class StableDiffusion(nn.Module):
             return latents
         # JA: end of sample function
 
-        depth_mask = F.interpolate(original_depth_mask, size=(64, 64), mode='bicubic',
+        if True: #self.second_model_type is None or view_dir == "front":
+            image_size = 512
+        else:
+            image_size = 256 # JA: We use image size of 256 when producing the image from non-front views using zero123 or control zero123
+
+        depth_mask = F.interpolate(original_depth_mask, size=(image_size // 8, image_size // 8), mode='bicubic',
                                    align_corners=False) # JA: original_depth_mask is D_t (in pixel space) and has a shape of (827, 827) and is a nonzero region of the depth image
         masked_latents = None
         if inputs is None:
@@ -516,23 +521,23 @@ class StableDiffusion(nn.Module):
             latents = inputs
         else:
             # JA: inputs is the "cropped_input" which represents the non-zero region of the rendered image of the current texture atlas
-            pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear',
+            pred_rgb_small = F.interpolate(inputs, (image_size, image_size), mode='bilinear',
                                          align_corners=False) # JA: Shape of inputs is (827, 827)
 
             # if self.second_model_type in ["zero123", "control_zero123"] and view_dir != "front":
             #     latents = None#torch.randn((64, 64), device=self.device)
             # else:
-            latents = self.encode_imgs(pred_rgb_512) # JA: Convert the rgb_render_output to the latent space of shape 64x64
+            latents = self.encode_imgs(pred_rgb_small) # JA: Convert the rgb_render_output to the latent space of shape 64x64
 
             if self.use_inpaint:
-                update_mask_512 = F.interpolate(update_mask, (512, 512))
-                masked_inputs = pred_rgb_512 * (update_mask_512 < 0.5) + 0.5 * (update_mask_512 >= 0.5)
+                update_mask_small = F.interpolate(update_mask, (image_size, image_size))
+                masked_inputs = pred_rgb_small * (update_mask_small < 0.5) + 0.5 * (update_mask_small >= 0.5)
                 masked_latents = self.encode_imgs(masked_inputs)
 
         if update_mask is not None:
-            update_mask = F.interpolate(update_mask, (64, 64), mode='nearest')
+            update_mask = F.interpolate(update_mask, (image_size // 8, image_size // 8), mode='nearest')
         if check_mask is not None:
-            check_mask = F.interpolate(check_mask, (64, 64), mode='nearest')
+            check_mask = F.interpolate(check_mask, (image_size // 8, image_size // 8), mode='nearest')
 
         # JA: Normalize depth map so that its values range from -1 to +1
         depth_mask = 2.0 * (depth_mask - depth_mask.min()) / (depth_mask.max() - depth_mask.min()) - 1.0
@@ -549,6 +554,9 @@ class StableDiffusion(nn.Module):
                                                                 # In our case, we need to obtain the image corresponding to a specific relative camera pose which
                                                                 # is obtained from the front view image. In our case target_rgb is the image created from zero123
                                                                 # by means of the relative camera pose.
+
+        # if image_size == 256:
+        #     target_rgb = F.interpolate(target_rgb, (512, 512))
 
         if latent_mode:
             return target_rgb, target_latents # JA: The target_rgb is the result from denoising the blended latent

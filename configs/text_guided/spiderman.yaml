@@ -1,5 +1,5 @@
 log:
-  exp_name: spiderman_controlzero123_only_front_view_string
+  exp_name: spiderman_c0123_5_1
 guide:
   text: "A photo of Spiderman, {} view"
   append_direction: True

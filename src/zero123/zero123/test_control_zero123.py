@@ -276,7 +276,7 @@ def run_demo(use_depth=True):
     midas.to(device)
     midas.eval()
 
-    root_dir = "/home/sogang/jaehoon/google"  # Starting directory
+    root_dir = "/home/sogang/jaehoon/google_test"  # Starting directory
 
     for subdir, dirs, files in os.walk(root_dir):
         if os.path.basename(subdir) == "thumbnails":
@@ -308,6 +308,7 @@ def run_demo(use_depth=True):
             save_path = os.path.join(subdir, new_filename)
             processed_image.save(save_path)
             print(f"Processed and saved: {save_path}")
+            break
 
     # results = main_run(
     #     models, device,

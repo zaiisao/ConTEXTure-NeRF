@@ -301,7 +301,7 @@ def preprocess_image(models, input_im, preprocess):
     start_time = time.time()
 
     if preprocess:
-        input_im = load_and_preprocess(models['carvekit'], input_im)
+        input_im, _ = load_and_preprocess(models['carvekit'], input_im)
         input_im = (input_im / 255.0).astype(np.float32)
         # (H, W, 3) array in [0, 1].
     else:
@@ -331,7 +331,7 @@ def main_run(models, device, cam_vis, return_what,
              x=0.0, y=0.0, z=0.0,
              raw_im=None, preprocess=True,
              scale=3.0, n_samples=4, ddim_steps=50, ddim_eta=1.0,
-             precision='fp32', h=256, w=256):
+             precision='fp32', h=512, w=512): #h=256, w=256):
     '''
     :param raw_im (PIL Image).
     '''
@@ -486,7 +486,7 @@ def calc_cam_cone_pts_3d(polar_deg, azimuth_deg, radius_m, fov_deg):
 
 def run_demo(
         device_idx=_GPU_INDEX,
-        ckpt='/home/jaehoon/repos/zero123/ControlNet/models/zero123-xl.ckpt',
+        ckpt='/home/sogang/jaehoon/TEXTureWithZero123/epoch=19-step=6359.ckpt',
         config='configs/sd-objaverse-finetune-c_concat-256.yaml'):
 
     print('sys.argv:', sys.argv)
