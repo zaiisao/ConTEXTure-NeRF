@@ -143,10 +143,8 @@ class TEXTure:
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
         self.mesh_model.train()
 
-        depths = []
-        masks = []
+        render_outputs = []
         depths_rgba = []
-        max_depth_size = -float("inf")
 
         for i, data in enumerate(self.dataloaders['train']):
             if i == 0:
@@ -162,28 +160,16 @@ class TEXTure:
 
             outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
 
-            min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
-            # crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-            # depth = 1 - crop(outputs['depth'])
-            # mask = crop(outputs['mask'])
-            depth = 1 - outputs['depth']
-            mask = outputs['mask']
+            render_outputs.append(outputs)
 
-            max_depth_size = max(max_depth_size, max_h - min_h)
+        for i, render_output in enumerate(render_outputs):
+            depth = 1 - render_output['depth']
+            mask = render_output['mask']
 
-            # depth_rgba = torch.cat((depth, depth, depth, mask), dim=1)
-
-            depths.append(depth)
-            masks.append(mask)
-
-        for i, depth in enumerate(depths):
-            # depths[i] = pad_tensor_to_size(depth, max_depth_size, max_depth_size, value=1)
-            # masks[i] = pad_tensor_to_size(masks[i], max_depth_size, max_depth_size, value=0)
-            depth_rgba = torch.cat((depths[i], depths[i], depths[i], masks[i]), dim=1)
+            depth_rgba = torch.cat((depth, depth, depth, mask), dim=1)
             depths_rgba.append(depth_rgba)
 
         zero123plus_cond = pad_tensor_to_size(self.zero123_front_input[0], 1200, 1200, value=1)
-        # zero123plus_cond = self.zero123_front_input[0]
         depth_grid = torch.cat((
             torch.cat((depths_rgba[0], depths_rgba[3]), dim=3),
             torch.cat((depths_rgba[1], depths_rgba[4]), dim=3),
@@ -201,7 +187,7 @@ class TEXTure:
         # pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
         #     pipeline.scheduler.config, timestep_spacing='trailing'
         # )
-        pipeline.to('cuda:0')
+        pipeline.to(self.device)
         # Run the pipeline
 
         # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
@@ -219,12 +205,10 @@ class TEXTure:
             cond_image,
             depth_image=depth_image,
             num_inference_steps=36,
-            # width=1200,
-            # height=1800
             callback_on_step_end=on_step_end
         ).images[0]
 
-        grid_image = torchvision.transforms.functional.pil_to_tensor(result).float() / 255
+        grid_image = torchvision.transforms.functional.pil_to_tensor(result).to(self.device).float() / 255
 
         images = []
 
@@ -241,6 +225,48 @@ class TEXTure:
                 original_image = grid_image[:, start_row:end_row, start_col:end_col]
                 images_col.append(original_image)
             images.append(images_col)
+
+        for i, data in enumerate(self.dataloaders['train']):
+            if i == 0:
+                continue
+
+            image_row_index = (i - 1) % 3
+            image_col_index = (i - 1) // 3
+
+            image = images[image_row_index][image_col_index][None]
+
+            rgb_output = F.interpolate(image, (1200, 1200), mode='bilinear', align_corners=False)
+
+            outputs = render_outputs[i - 1]
+
+            render_cache = outputs['render_cache'] # JA: All the render outputs have the shape of (1200, 1200)
+            rgb_render_raw = outputs['image']  # Render where missing values have special color
+            depth_render = outputs['depth']
+            # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
+            outputs = self.mesh_model.render(background=background,
+                                            render_cache=render_cache, use_median=self.paint_step > 1)
+
+            # Render meta texture map
+            meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
+                                                use_meta_texture=True, render_cache=render_cache)
+
+            z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
+            z_normals_cache = meta_output['image'].clamp(0, 1)
+            edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
+
+            # JA: Create trimap of keep, refine, and generate using the render output
+            update_mask, _, _ = self.calculate_trimap(rgb_render_raw=rgb_render_raw,
+                                                                            depth_render=depth_render,
+                                                                            z_normals=z_normals,
+                                                                            z_normals_cache=z_normals_cache,
+                                                                            edited_mask=edited_mask,
+                                                                            mask=outputs['mask'])
+
+            object_mask = outputs['mask'] # JA: mask has a shape of 1200x1200
+
+            fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
+                                                object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
+                                                z_normals_cache=z_normals_cache)
 
         self.mesh_model.change_default_to_median()
         logger.info('Finished Painting ^_^')
