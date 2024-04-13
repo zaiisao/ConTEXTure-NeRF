@@ -120,3 +120,22 @@ def color_with_shade(color: List[float], z_normals: torch.Tensor, light_coef=0.7
     shaded_color = torch.tensor(color).view(1, 3, 1, 1).to(
         z_normals.device) * normals_with_light
     return shaded_color
+
+def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
+    # Get the current dimensions of the tensor
+    current_height, current_width = input_tensor.shape[-2], input_tensor.shape[-1]
+    
+    # Calculate padding needed
+    pad_height = target_height - current_height
+    pad_width = target_width - current_width
+
+    # Calculate padding for top/bottom and left/right
+    pad_top = pad_height // 2
+    pad_bottom = pad_height - pad_top
+    pad_left = pad_width // 2
+    pad_right = pad_width - pad_left
+
+    # Apply the padding
+    padded_tensor = F.pad(input_tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=value)
+    
+    return padded_tensor

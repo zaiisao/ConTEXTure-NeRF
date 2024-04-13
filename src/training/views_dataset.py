@@ -85,6 +85,52 @@ def circle_poses(device, radius=1.25, theta=60.0, phi=0.0, angle_overhead=30.0, 
     return dirs, thetas.item(), phis.item(), radius
 
 
+class Zero123PlusDataset:
+    def __init__(self, cfg: RenderConfig, device):
+        super().__init__()
+
+        self.cfg = cfg
+        self.device = device
+        self.type = type  # train, val, tests
+
+        self.phis = [0, 30, 150, 270, 90, 210, 330]
+
+        # JA: In Zero123++, the thetas (elevation) are absolute angles, unlike the azimuth angles
+        self.thetas = [self.cfg.base_theta] + ([self.cfg.base_theta - 30] * 3) + ([self.cfg.base_theta + 20] * 3)
+
+        self.size = len(self.phis)
+
+    def collate(self, index):
+
+        # B = len(index)  # always 1
+
+        # phi = (index[0] / self.size) * 360
+        phi = self.phis[index[0]]
+        theta = self.thetas[index[0]]
+        radius = self.cfg.radius
+        dirs, thetas, phis, radius = circle_poses(self.device, radius=radius, theta=theta,
+                                                  phi=phi,
+                                                  angle_overhead=self.cfg.overhead_range,
+                                                  angle_front=self.cfg.front_range)
+
+        base_theta = math.radians(self.cfg.base_theta)
+
+        data = {
+            'dir': dirs,
+            'theta': thetas,
+            'phi': phis,
+            'radius': radius,
+            'base_theta': base_theta
+        }
+
+        return data
+
+    def dataloader(self):
+        loader = DataLoader(list(range(self.size)), batch_size=1, collate_fn=self.collate, shuffle=False,
+                            num_workers=0)
+        loader._data = self  # an ugly fix... we need to access dataset in trainer.
+        return loader    
+
 class MultiviewDataset:
     def __init__(self, cfg: RenderConfig, device):
         super().__init__()

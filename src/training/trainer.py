@@ -15,12 +15,16 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import torchvision
+from PIL import Image
+from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler, ControlNetModel
+
 from src import utils
 from src.configs.train_config import TrainConfig
 from src.models.textured_mesh import TexturedMeshModel
 from src.stable_diffusion_depth import StableDiffusion
-from src.training.views_dataset import ViewsDataset, MultiviewDataset
-from src.utils import make_path, tensor2numpy
+from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, MultiviewDataset
+from src.utils import make_path, tensor2numpy, pad_tensor_to_size
 
 
 class TEXTure:
@@ -107,7 +111,10 @@ class TEXTure:
         return text_z, text_string # JA: text_z contains the embedded vectors of the six view prompts
 
     def init_dataloaders(self) -> Dict[str, DataLoader]:
-        init_train_dataloader = MultiviewDataset(self.cfg.render, device=self.device).dataloader()
+        if self.cfg.guide.use_zero123plus:
+            init_train_dataloader = Zero123PlusDataset(self.cfg.render, device=self.device).dataloader()
+        else:
+            init_train_dataloader = MultiviewDataset(self.cfg.render, device=self.device).dataloader()
 
         val_loader = ViewsDataset(self.cfg.render, device=self.device,
                                   size=self.cfg.log.eval_size).dataloader()
@@ -125,6 +132,123 @@ class TEXTure:
         logger.add(self.exp_path / 'log.txt', colorize=False, format=log_format)
 
     def paint(self):
+        if self.cfg.guide.use_zero123plus:
+            self.paint_zero123plus()
+        else:
+            self.paint_legacy()
+
+    def paint_zero123plus(self):
+        logger.info('Starting training ^_^')
+        # Evaluate the initialization
+        self.evaluate(self.dataloaders['val'], self.eval_renders_path)
+        self.mesh_model.train()
+
+        depths = []
+        masks = []
+        depths_rgba = []
+        max_depth_size = -float("inf")
+
+        for i, data in enumerate(self.dataloaders['train']):
+            if i == 0:
+                # JA: The first viewpoint should always be frontal
+                self.paint_viewpoint(data)
+                continue
+
+            theta, phi, radius = data['theta'], data['phi'], data['radius']
+            phi = phi - np.deg2rad(self.cfg.render.front_offset)
+            phi = float(phi + 2 * np.pi if phi < 0 else phi)
+
+            background = torch.Tensor([1, 1, 1]).to(self.device)
+
+            outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
+
+            min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
+            # crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
+            # depth = 1 - crop(outputs['depth'])
+            # mask = crop(outputs['mask'])
+            depth = 1 - outputs['depth']
+            mask = outputs['mask']
+
+            max_depth_size = max(max_depth_size, max_h - min_h)
+
+            # depth_rgba = torch.cat((depth, depth, depth, mask), dim=1)
+
+            depths.append(depth)
+            masks.append(mask)
+
+        for i, depth in enumerate(depths):
+            # depths[i] = pad_tensor_to_size(depth, max_depth_size, max_depth_size, value=1)
+            # masks[i] = pad_tensor_to_size(masks[i], max_depth_size, max_depth_size, value=0)
+            depth_rgba = torch.cat((depths[i], depths[i], depths[i], masks[i]), dim=1)
+            depths_rgba.append(depth_rgba)
+
+        zero123plus_cond = pad_tensor_to_size(self.zero123_front_input[0], 1200, 1200, value=1)
+        # zero123plus_cond = self.zero123_front_input[0]
+        depth_grid = torch.cat((
+            torch.cat((depths_rgba[0], depths_rgba[3]), dim=3),
+            torch.cat((depths_rgba[1], depths_rgba[4]), dim=3),
+            torch.cat((depths_rgba[2], depths_rgba[5]), dim=3),
+        ), dim=2)
+
+        pipeline = DiffusionPipeline.from_pretrained(
+            "sudo-ai/zero123plus-v1.1", custom_pipeline="sudo-ai/zero123plus-pipeline",
+            torch_dtype=torch.float16
+        )
+        pipeline.add_controlnet(ControlNetModel.from_pretrained(
+            "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
+        ), conditioning_scale=2)
+        # Feel free to tune the scheduler
+        # pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+        #     pipeline.scheduler.config, timestep_spacing='trailing'
+        # )
+        pipeline.to('cuda:0')
+        # Run the pipeline
+
+        # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
+        cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond).resize((320, 320))
+        depth_image = torchvision.transforms.functional.to_pil_image(depth_grid[0]).resize((640, 960))
+
+        def on_step_end(pipeline, i, t, callback_kwargs):
+            # print(pipeline, i, t, callback_kwargs)
+            latents = callback_kwargs["latents"]
+            image = pipeline.vae.decode(latents / pipeline.vae.config.scaling_factor, return_dict=False)[0]
+            return callback_kwargs
+
+        # JA: Here we call the Zero123++ pipeline
+        result = pipeline(
+            cond_image,
+            depth_image=depth_image,
+            num_inference_steps=36,
+            # width=1200,
+            # height=1800
+            callback_on_step_end=on_step_end
+        ).images[0]
+
+        grid_image = torchvision.transforms.functional.pil_to_tensor(result).float() / 255
+
+        images = []
+
+        for row in range(3):
+            images_col = []
+            for col in range(2):
+                # Calculate the start and end indices for the slices
+                start_row = row * 320
+                end_row = start_row + 320
+                start_col = col * 320
+                end_col = start_col + 320
+
+                # Slice the tensor and add to the list
+                original_image = grid_image[:, start_row:end_row, start_col:end_col]
+                images_col.append(original_image)
+            images.append(images_col)
+
+        self.mesh_model.change_default_to_median()
+        logger.info('Finished Painting ^_^')
+        logger.info('Saving the last result...')
+        self.full_eval()
+        logger.info('\tDone!')
+
+    def paint_legacy(self):
         logger.info('Starting training ^_^')
         # Evaluate the initialization
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
