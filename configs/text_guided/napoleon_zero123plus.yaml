@@ -1,5 +1,5 @@
 log:
-  exp_name: napoleon_zero123plus
+  exp_name: napoleon_zero123plus_noblend
 guide:
   text: "A photo of Napoleon Bonaparte, {} view"
   append_direction: True

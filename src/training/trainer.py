@@ -227,7 +227,80 @@ class TEXTure:
         depth_image = torchvision.transforms.functional.to_pil_image(depth_grid[0]).resize((640, 960))
 
         @torch.enable_grad
-        def on_step_end(pipeline, i, t, callback_kwargs):
+        # def on_step_end(pipeline, i, t, callback_kwargs):
+        #     grid_latent = callback_kwargs["latents"]
+
+        #     check_mask_iters = 0.5
+
+        #     latents = split_zero123plus_grid(grid_latent, 320 // pipeline.vae_scale_factor)
+        #     blended_latents = []
+        #     rgb_outputs = []
+
+        #     for viewpoint_index, data in enumerate(self.dataloaders['train']):
+        #         if viewpoint_index == 0:
+        #             continue
+
+        #         theta, phi, radius = data['theta'], data['phi'], data['radius']
+        #         phi = phi - np.deg2rad(self.cfg.render.front_offset)
+        #         phi = float(phi + 2 * np.pi if phi < 0 else phi)
+
+        #         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
+        #         render_cache = outputs['render_cache']
+        #         outputs = self.mesh_model.render(
+        #             background=torch.Tensor([0.5, 0.5, 0.5]).to(self.device),
+        #             render_cache=render_cache,
+        #             use_median=True
+        #         )
+
+        #         rgb_render = outputs['image']
+
+        #         image_row_index = (viewpoint_index - 1) % 3
+        #         image_col_index = (viewpoint_index - 1) // 3
+
+        #         latent = latents[image_row_index][image_col_index]
+
+        #         update_mask = viewpoint_data[viewpoint_index - 1]["update_mask"]
+        #         refine_mask = viewpoint_data[viewpoint_index - 1]["refine_mask"]
+        #         generate_mask = viewpoint_data[viewpoint_index - 1]["generate_mask"]
+
+        #         check_mask = self.generate_checkerboard(update_mask, refine_mask, generate_mask)
+
+        #         rgb_render_small = F.interpolate(rgb_render, (320, 320), mode='bilinear', align_corners=False)
+        #         gt_latents = pipeline.vae.encode(
+        #             rgb_render_small.half(),
+        #             return_dict=False
+        #         )[0].sample() * pipeline.vae.config.scaling_factor
+        #         noise = torch.randn_like(gt_latents)
+        #         noised_truth = pipeline.scheduler.add_noise(gt_latents, noise, t[None])
+
+        #         if check_mask is not None and i < int(pipeline.num_timesteps * check_mask_iters):
+        #             curr_mask = F.interpolate(
+        #                 check_mask,
+        #                 (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
+        #                 mode='nearest'
+        #             )
+        #         else:
+        #             curr_mask = F.interpolate(
+        #                 update_mask,
+        #                 (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
+        #                 mode='nearest'
+        #             )
+
+        #         def scale_latents(latents):
+        #             latents = (latents - 0.22) * 0.75
+        #             return latents
+
+        #         blended_latent = latent * curr_mask + scale_latents(noised_truth) * (1 - curr_mask) # JA: latent will be unscaled after generation. To make noised_truth unscaled as well, we scale them.
+        #         blended_latents.append(blended_latent) # blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask)
+            
+        #     callback_kwargs["latents"] = torch.cat((
+        #         torch.cat((blended_latents[0], blended_latents[3]), dim=3),
+        #         torch.cat((blended_latents[1], blended_latents[4]), dim=3),
+        #         torch.cat((blended_latents[2], blended_latents[5]), dim=3),
+        #     ), dim=2).half()
+
+        #     return callback_kwargs
+        def on_step_end_project_back(pipeline, i, t, callback_kwargs):
             grid_latent = callback_kwargs["latents"]
 
             check_mask_iters = 0.5
@@ -245,6 +318,20 @@ class TEXTure:
                 phi = float(phi + 2 * np.pi if phi < 0 else phi)
 
                 outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
+                render_cache = outputs['render_cache']
+                # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
+                outputs = self.mesh_model.render(
+                    background=torch.Tensor([0.5, 0.5, 0.5]).to(self.device),
+                    render_cache=render_cache,
+                    use_median=True
+                )
+
+                rgb_render = outputs['image']
+                # Render meta texture map
+                meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
+                                                    use_meta_texture=True, render_cache=render_cache)
+                z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
+                z_normals_cache = meta_output['image'].clamp(0, 1)
 
                 image_row_index = (viewpoint_index - 1) % 3
                 image_col_index = (viewpoint_index - 1) // 3
@@ -302,14 +389,15 @@ class TEXTure:
 
                 rgb_outputs.append(rgb_output)
 
-                if i == 35:
-                    print("AAA")
-
                 self.project_back(
                     render_cache=render_cache, background=background, rgb_output=rgb_output,
                     object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
                     z_normals_cache=z_normals_cache
                 )
+
+                if i == 35:
+                    self.evaluate(self.dataloaders['val'], self.eval_renders_path)
+                    self.mesh_model.train()
 
             # self.project_back_all_viewpoints(self.dataloaders['train'], viewpoint_data, rgb_outputs)
             
@@ -321,12 +409,13 @@ class TEXTure:
 
             return callback_kwargs
 
+
         # JA: Here we call the Zero123++ pipeline
         result = pipeline(
             cond_image,
             depth_image=depth_image,
-            num_inference_steps=5,
-            callback_on_step_end=on_step_end
+            num_inference_steps=36#,
+            # callback_on_step_end=on_step_end_project_back
         ).images[0]
 
         grid_image = torchvision.transforms.functional.pil_to_tensor(result).to(self.device).float() / 255
@@ -358,7 +447,7 @@ class TEXTure:
             depth_render = outputs['depth']
             # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
             outputs = self.mesh_model.render(background=background,
-                                            render_cache=render_cache, use_median=self.paint_step > 1)
+                                            render_cache=render_cache, use_median=True)
 
             # Render meta texture map
             meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
