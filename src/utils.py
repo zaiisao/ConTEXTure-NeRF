@@ -139,3 +139,28 @@ def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
     padded_tensor = F.pad(input_tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=value)
     
     return padded_tensor
+
+def split_zero123plus_grid(grid_image, tile_size):
+    images = []
+    for row in range(3):
+        images_col = []
+        for col in range(2):
+            # Calculate the start and end indices for the slices
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+            # Slice the tensor and add to the list
+            if len(grid_image.shape) == 3:
+                original_image = grid_image[:, start_row:end_row, start_col:end_col]
+            elif len(grid_image.shape) == 4:
+                original_image = grid_image[:, :, start_row:end_row, start_col:end_col]
+            else:
+                raise NotImplementedError
+
+            images_col.append(original_image)
+
+        images.append(images_col)
+
+    return images
