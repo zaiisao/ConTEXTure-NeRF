@@ -152,7 +152,7 @@ class TEXTure:
         for i, data in enumerate(self.dataloaders['train']):
             if i == 0:
                 # JA: The first viewpoint should always be frontal
-                self.paint_viewpoint(data)
+                self.paint_viewpoint(data, should_project_back=False)
                 continue
 
             theta, phi, radius = data['theta'], data['phi'], data['radius']
@@ -224,82 +224,90 @@ class TEXTure:
 
         # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
         cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond).resize((320, 320))
+
+        # JA: From: https://pytorch.org/vision/main/generated/torchvision.transforms.ToPILImage.html
+        # Converts a torch.*Tensor of shape C x H x W or a numpy ndarray of shape H x W x C to a PIL Image
+        # while adjusting the value range depending on the mode.
+        # From: https://www.geeksforgeeks.org/python-pil-image-resize-method/
+        # Parameters: 
+        # size – The requested size in pixels, as a 2-tuple: (width, height).
         depth_image = torchvision.transforms.functional.to_pil_image(depth_grid[0]).resize((640, 960))
 
         @torch.enable_grad
         # def on_step_end(pipeline, i, t, callback_kwargs):
-        #     grid_latent = callback_kwargs["latents"]
+            # grid_latent = callback_kwargs["latents"]
 
-        #     check_mask_iters = 0.5
+            # check_mask_iters = 0.5
 
-        #     latents = split_zero123plus_grid(grid_latent, 320 // pipeline.vae_scale_factor)
-        #     blended_latents = []
-        #     rgb_outputs = []
+            # latents = split_zero123plus_grid(grid_latent, 320 // pipeline.vae_scale_factor)
+            # blended_latents = []
+            # rgb_outputs = []
 
-        #     for viewpoint_index, data in enumerate(self.dataloaders['train']):
-        #         if viewpoint_index == 0:
-        #             continue
+            # for viewpoint_index, data in enumerate(self.dataloaders['train']):
+            #     if viewpoint_index == 0:
+            #         continue
 
-        #         theta, phi, radius = data['theta'], data['phi'], data['radius']
-        #         phi = phi - np.deg2rad(self.cfg.render.front_offset)
-        #         phi = float(phi + 2 * np.pi if phi < 0 else phi)
+            #     theta, phi, radius = data['theta'], data['phi'], data['radius']
+            #     phi = phi - np.deg2rad(self.cfg.render.front_offset)
+            #     phi = float(phi + 2 * np.pi if phi < 0 else phi)
 
-        #         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
-        #         render_cache = outputs['render_cache']
-        #         outputs = self.mesh_model.render(
-        #             background=torch.Tensor([0.5, 0.5, 0.5]).to(self.device),
-        #             render_cache=render_cache,
-        #             use_median=True
-        #         )
+            #     outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
+            #     render_cache = outputs['render_cache']
+            #     outputs = self.mesh_model.render(
+            #         background=torch.Tensor([0.5, 0.5, 0.5]).to(self.device),
+            #         render_cache=render_cache,
+            #         use_median=True
+            #     )
 
-        #         rgb_render = outputs['image']
+            #     rgb_render = outputs['image']
 
-        #         image_row_index = (viewpoint_index - 1) % 3
-        #         image_col_index = (viewpoint_index - 1) // 3
+            #     image_row_index = (viewpoint_index - 1) % 3
+            #     image_col_index = (viewpoint_index - 1) // 3
 
-        #         latent = latents[image_row_index][image_col_index]
+            #     latent = latents[image_row_index][image_col_index]
 
-        #         update_mask = viewpoint_data[viewpoint_index - 1]["update_mask"]
-        #         refine_mask = viewpoint_data[viewpoint_index - 1]["refine_mask"]
-        #         generate_mask = viewpoint_data[viewpoint_index - 1]["generate_mask"]
+            #     update_mask = viewpoint_data[viewpoint_index - 1]["update_mask"]
+            #     refine_mask = viewpoint_data[viewpoint_index - 1]["refine_mask"]
+            #     generate_mask = viewpoint_data[viewpoint_index - 1]["generate_mask"]
 
-        #         check_mask = self.generate_checkerboard(update_mask, refine_mask, generate_mask)
+            #     check_mask = self.generate_checkerboard(update_mask, refine_mask, generate_mask)
 
-        #         rgb_render_small = F.interpolate(rgb_render, (320, 320), mode='bilinear', align_corners=False)
-        #         gt_latents = pipeline.vae.encode(
-        #             rgb_render_small.half(),
-        #             return_dict=False
-        #         )[0].sample() * pipeline.vae.config.scaling_factor
-        #         noise = torch.randn_like(gt_latents)
-        #         noised_truth = pipeline.scheduler.add_noise(gt_latents, noise, t[None])
+            #     rgb_render_small = F.interpolate(rgb_render, (320, 320), mode='bilinear', align_corners=False)
+            #     gt_latents = pipeline.vae.encode(
+            #         rgb_render_small.half(),
+            #         return_dict=False
+            #     )[0].sample() * pipeline.vae.config.scaling_factor
+            #     noise = torch.randn_like(gt_latents)
+            #     noised_truth = pipeline.scheduler.add_noise(gt_latents, noise, t[None])
 
-        #         if check_mask is not None and i < int(pipeline.num_timesteps * check_mask_iters):
-        #             curr_mask = F.interpolate(
-        #                 check_mask,
-        #                 (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
-        #                 mode='nearest'
-        #             )
-        #         else:
-        #             curr_mask = F.interpolate(
-        #                 update_mask,
-        #                 (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
-        #                 mode='nearest'
-        #             )
+            #     if check_mask is not None and i < int(pipeline.num_timesteps * check_mask_iters):
+            #         curr_mask = F.interpolate(
+            #             check_mask,
+            #             (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
+            #             mode='nearest'
+            #         )
+            #     else:
+            #         curr_mask = F.interpolate(
+            #             update_mask,
+            #             (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
+            #             mode='nearest'
+            #         )
 
-        #         def scale_latents(latents):
-        #             latents = (latents - 0.22) * 0.75
-        #             return latents
+            #     def scale_latents(latents):
+            #         latents = (latents - 0.22) * 0.75
+            #         return latents
 
-        #         blended_latent = latent * curr_mask + scale_latents(noised_truth) * (1 - curr_mask) # JA: latent will be unscaled after generation. To make noised_truth unscaled as well, we scale them.
-        #         blended_latents.append(blended_latent) # blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask)
+            #     blended_latent = latent * curr_mask + scale_latents(noised_truth) * (1 - curr_mask) # JA: latent will be unscaled after generation. To make noised_truth unscaled as well, we scale them.
+            #     blended_latents.append(blended_latent) # blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask)
             
-        #     callback_kwargs["latents"] = torch.cat((
-        #         torch.cat((blended_latents[0], blended_latents[3]), dim=3),
-        #         torch.cat((blended_latents[1], blended_latents[4]), dim=3),
-        #         torch.cat((blended_latents[2], blended_latents[5]), dim=3),
-        #     ), dim=2).half()
+            # callback_kwargs["latents"] = torch.cat((
+            #     torch.cat((blended_latents[0], blended_latents[3]), dim=3),
+            #     torch.cat((blended_latents[1], blended_latents[4]), dim=3),
+            #     torch.cat((blended_latents[2], blended_latents[5]), dim=3),
+            # ), dim=2).half()
 
-        #     return callback_kwargs
+            # return callback_kwargs
+
         def on_step_end_project_back(pipeline, i, t, callback_kwargs):
             grid_latent = callback_kwargs["latents"]
 
@@ -414,8 +422,8 @@ class TEXTure:
         result = pipeline(
             cond_image,
             depth_image=depth_image,
-            num_inference_steps=36#,
-            # callback_on_step_end=on_step_end_project_back
+            num_inference_steps=36,
+            callback_on_step_end=on_step_end_project_back
         ).images[0]
 
         grid_image = torchvision.transforms.functional.pil_to_tensor(result).to(self.device).float() / 255
@@ -549,7 +557,7 @@ class TEXTure:
             logger.info(f"\tDone!")
 
     # JA: paint_viewpoint computes a portion of the texture atlas for the given viewpoint
-    def paint_viewpoint(self, data: Dict[str, Any]):
+    def paint_viewpoint(self, data: Dict[str, Any], should_project_back=True):
         logger.info(f'--- Painting step #{self.paint_step} ---')
         theta, phi, radius = data['theta'], data['phi'], data['radius'] # JA: data represents a viewpoint which is stored in the dataset
         # If offset of phi was set from code
@@ -696,10 +704,11 @@ class TEXTure:
         # Project back
         object_mask = outputs['mask'] # JA: mask has a shape of 1200x1200
         # JA: Compute a part of the texture atlas corresponding to the target render image of the specific viewpoint
-        fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
-                                               object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
-                                               z_normals_cache=z_normals_cache)
-        self.log_train_image(fitted_pred_rgb, name='fitted')
+        if should_project_back:
+            fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
+                                                object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
+                                                z_normals_cache=z_normals_cache)
+            self.log_train_image(fitted_pred_rgb, name='fitted')
 
         # JA: Zero123 needs the input image without the background
         # rgb_output is the generated and uncropped image in pixel space
