@@ -26,9 +26,9 @@ class Renderer:
         pos = torch.tensor([x, y, z]).unsqueeze(0)
         look_at = torch.zeros_like(pos)
         look_at[:, 1] = look_at_height
-        direction = torch.tensor([0.0, 1.0, 0.0]).unsqueeze(0)
+        camera_up_direction = torch.tensor([0.0, 1.0, 0.0]).unsqueeze(0)
 
-        camera_proj = kal.render.camera.generate_transformation_matrix(pos, look_at, direction)
+        camera_proj = kal.render.camera.generate_transformation_matrix(pos, look_at, camera_up_direction)
         return camera_proj
     
     @staticmethod
@@ -40,9 +40,9 @@ class Renderer:
         pos = torch.stack([x, y, z], dim=1)
         look_at = torch.zeros_like(pos)
         look_at[:, 1] = look_at_height
-        direction = torch.ones_like(pos) * torch.tensor([0.0, 1.0, 0.0]).to(pos.device)
+        camera_up_direction = torch.ones_like(pos) * torch.tensor([0.0, 1.0, 0.0]).to(pos.device)
 
-        camera_proj = kal.render.camera.generate_transformation_matrix(pos, look_at, direction)
+        camera_proj = kal.render.camera.generate_transformation_matrix(pos, look_at, camera_up_direction)
         return camera_proj
 
 

@@ -359,14 +359,23 @@ class TexturedMeshModel(nn.Module):
     def render(self, theta=None, phi=None, radius=None, background=None,
                use_meta_texture=False, render_cache=None, use_median=False, dims=None, use_batch_render=True):
         if use_batch_render:
-            if theta is not None and not torch.is_tensor(theta):
-                theta = torch.tensor([theta]).to(self.device)
+            if theta is not None:
+                if isinstance(theta, float) or isinstance(theta, int):
+                    theta = torch.tensor([theta]).to(self.device) # JA: [B,]
+                elif isinstance(theta, list):
+                    theta = torch.tensor(theta).to(self.device) # JA: [B,]
 
-            if phi is not None and not torch.is_tensor(phi):
-                phi = torch.tensor([phi]).to(self.device)
+            if phi is not None:
+                if isinstance(phi, float) or isinstance(phi, int):
+                    phi = torch.tensor([phi]).to(self.device)
+                elif isinstance(phi, list):
+                    phi = torch.tensor(phi).to(self.device)
 
-            if radius is not None and not torch.is_tensor(radius):
-                radius = torch.tensor([radius]).to(self.device)
+            if radius is not None:
+                if isinstance(radius, float) or isinstance(radius, int):
+                    radius = torch.tensor([radius]).to(self.device)
+                elif isinstance(radius, list):
+                    radius = torch.tensor(radius).to(self.device)
 
             return self.render_batch(theta, phi, radius, background,
                 use_meta_texture, render_cache, use_median, dims)
@@ -424,6 +433,7 @@ class TexturedMeshModel(nn.Module):
             pred_back = pred_features
         else:
             if background is None:
+                # JA: background_sphere_colors is used when the background is None
                 pred_back, _, _ = self.renderer.render_single_view(self.env_sphere,
                                                                    background_sphere_colors,
                                                                    elev=theta,
@@ -476,9 +486,13 @@ class TexturedMeshModel(nn.Module):
         if background is not None and type(background) == str: # JA: If background is a string, set it as the type
             background_type = background
             use_render_back = True
+        
+        # JA: We need to repeat several tensors to support the batch size.
+        # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
+        # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
         pred_features, mask, depth, normals, render_cache = self.renderer.render_multiple_view_texture(
-            augmented_vertices,
-            self.mesh.faces,
+            augmented_vertices[None].repeat(batch_size, 1, 1),
+            self.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.face_attributes.repeat(batch_size, 1, 1, 1),
             texture_img.repeat(batch_size, 1, 1, 1),
             elev=theta,
