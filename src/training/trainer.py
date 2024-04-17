@@ -76,6 +76,10 @@ class TEXTure:
     def init_diffusion(self) -> Any:
         # JA: The StableDiffusion class composes a pipeline by using individual components such as VAE encoder,
         # CLIP encoder, and UNet
+        second_model_type = self.cfg.guide.second_model_type
+        if self.cfg.guide.use_zero123plus:
+            second_model_type = "zero123plus"
+
         diffusion_model = StableDiffusion(self.device, model_name=self.cfg.guide.diffusion_name,
                                           concept_name=self.cfg.guide.concept_name,
                                           concept_path=self.cfg.guide.concept_path,
@@ -175,9 +179,9 @@ class TEXTure:
             meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
                                                 use_meta_texture=True, render_cache=render_cache)
 
-            z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
-            z_normals_cache = meta_output['image'].clamp(0, 1)
-            edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
+            z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1).detach()
+            z_normals_cache = meta_output['image'].clamp(0, 1).detach()
+            edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2].detach()
 
             update_mask, generate_mask, refine_mask = self.calculate_trimap(rgb_render_raw=rgb_render_raw,
                                                                             depth_render=depth_render,
@@ -397,17 +401,14 @@ class TEXTure:
 
                 rgb_outputs.append(rgb_output)
 
-                self.project_back(
-                    render_cache=render_cache, background=background, rgb_output=rgb_output,
-                    object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
-                    z_normals_cache=z_normals_cache
-                )
+                # self.project_back(
+                #     render_cache=render_cache, background=background, rgb_output=rgb_output,
+                #     object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
+                #     z_normals_cache=z_normals_cache
+                # )
 
-                if i == 35:
-                    self.evaluate(self.dataloaders['val'], self.eval_renders_path)
-                    self.mesh_model.train()
-
-            # self.project_back_all_viewpoints(self.dataloaders['train'], viewpoint_data, rgb_outputs)
+            num_epochs = num_epochs = int(200 * (i + 1) / 36)
+            self.project_back_all_viewpoints(self.dataloaders['train'], viewpoint_data, rgb_outputs, num_epochs)
             
             callback_kwargs["latents"] = torch.cat((
                 torch.cat((blended_latents[0], blended_latents[3]), dim=3),
@@ -853,16 +854,18 @@ class TEXTure:
         checker_mask[only_old_mask == 1] = checkerboard[only_old_mask == 1]
         return checker_mask
     
-    def project_back_all_viewpoints(self, dataloader, viewpoint_data, rgb_outputs):
+    def project_back_all_viewpoints(self, dataloader, viewpoint_data, rgb_outputs, num_epochs=200):
         background = torch.Tensor([0.5, 0.5, 0.5]).to(self.device)
         optimizer = torch.optim.Adam(self.mesh_model.get_params(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                     eps=1e-15)
-
-        for _ in tqdm(range(200), desc='fitting mesh colors'):
+        
+        for _ in tqdm(range(num_epochs), desc='fitting mesh colors'):
             loss = 0
             for viewpoint_index, data in enumerate(dataloader):
                 if viewpoint_index == 0:
                     continue
+
+                optimizer.zero_grad()
 
                 theta, phi, radius = data['theta'], data['phi'], data['radius']
                 phi = phi - np.deg2rad(self.cfg.render.front_offset)
@@ -915,7 +918,6 @@ class TEXTure:
                 # Update the normals
                 z_normals_cache[:, 0, :, :] = torch.max(z_normals_cache[:, 0, :, :], z_normals[:, 0, :, :])
 
-                optimizer.zero_grad()
                 outputs = self.mesh_model.render(background=background,
                                                 render_cache=render_cache)
                 rgb_render = outputs['image']
@@ -935,9 +937,14 @@ class TEXTure:
                 masked_last_z_normals = z_normals_cache.reshape(1, z_normals_cache.shape[1], -1)[:, :,
                                         current_z_mask == 1][:, :1]
                 loss += (masked_current_z_normals - masked_last_z_normals.detach()).pow(2).mean()
+            # viewpoint loop end
 
             loss.backward()
             optimizer.step()
+            del loss
+            del outputs, rgb_render_raw, depth_render, z_normals, z_normals_cache, object_mask, render_update_mask, blurred_render_update_mask, masked_pred, masked_target, masked_mask
+            torch.cuda.empty_cache() 
+        # epoch loop end
 
     def project_back(self, render_cache: Dict[str, Any], background: Any, rgb_output: torch.Tensor,
                      object_mask: torch.Tensor, update_mask: torch.Tensor, z_normals: torch.Tensor,

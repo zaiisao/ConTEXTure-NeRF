@@ -294,7 +294,9 @@ class TexturedMeshModel(nn.Module):
         raise NotImplementedError
 
     def get_params(self):
-        return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
+        # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
+        return [self.texture_img, self.meta_texture_img]    # JA: In our experiment, self.background_sphere_colors
+                                                            # are not used as parameters of the loss function
 
     @torch.no_grad()
     def export_mesh(self, path):
@@ -355,6 +357,24 @@ class TexturedMeshModel(nn.Module):
             fp.write(f'map_Kd {name}albedo.png \n')
 
     def render(self, theta=None, phi=None, radius=None, background=None,
+               use_meta_texture=False, render_cache=None, use_median=False, dims=None, use_batch_render=True):
+        if use_batch_render:
+            if theta is not None and not torch.is_tensor(theta):
+                theta = torch.tensor([theta]).to(self.device)
+
+            if phi is not None and not torch.is_tensor(phi):
+                phi = torch.tensor([phi]).to(self.device)
+
+            if radius is not None and not torch.is_tensor(radius):
+                radius = torch.tensor([radius]).to(self.device)
+
+            return self.render_batch(theta, phi, radius, background,
+                use_meta_texture, render_cache, use_median, dims)
+        else:
+            return self.render_legacy(theta, phi, radius, background,
+                use_meta_texture, render_cache, use_median, dims)
+        
+    def render_legacy(self, theta=None, phi=None, radius=None, background=None,
                use_meta_texture=False, render_cache=None, use_median=False, dims=None):
         if render_cache is None:
             assert theta is not None and phi is not None and radius is not None
@@ -405,6 +425,79 @@ class TexturedMeshModel(nn.Module):
         else:
             if background is None:
                 pred_back, _, _ = self.renderer.render_single_view(self.env_sphere,
+                                                                   background_sphere_colors,
+                                                                   elev=theta,
+                                                                   azim=phi,
+                                                                   radius=radius,
+                                                                   dims=dims,
+                                                                   look_at_height=self.dy, calc_depth=False)
+            elif len(background.shape) == 1:
+                pred_back = torch.ones_like(pred_features) * background.reshape(1, 3, 1, 1)
+            else:
+                pred_back = background
+
+            pred_map = pred_back * (1 - mask) + pred_features * mask
+
+        if not use_meta_texture:
+            pred_map = pred_map.clamp(0, 1)
+            pred_features = pred_features.clamp(0, 1)
+
+        return {'image': pred_map, 'mask': mask, 'background': pred_back,
+                'foreground': pred_features, 'depth': depth, 'normals': normals, 'render_cache': render_cache,
+                'texture_map': texture_img}
+    
+    def render_batch(self, theta=None, phi=None, radius=None, background=None,
+               use_meta_texture=False, render_cache=None, use_median=False, dims=None):
+        if render_cache is None:
+            batch_size = theta.shape[0]
+            assert theta is not None and phi is not None and radius is not None
+        else:
+            batch_size = render_cache["uv_features"].shape[0]
+        background_sphere_colors = self.background_sphere_colors[
+            torch.randint(0, self.background_sphere_colors.shape[0], (batch_size,))]
+        texture_img = self.meta_texture_img if use_meta_texture else self.texture_img
+
+        if self.augmentations:
+            augmented_vertices = self.augment_vertices()
+        else:
+            augmented_vertices = self.mesh.vertices
+
+        if use_median:
+            diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+                self.device)).abs().sum(axis=1)
+            default_mask = (diff < 0.1).float().unsqueeze(0)
+            median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+                axis=1)
+            texture_img = texture_img.clone()
+            with torch.no_grad():
+                texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+        background_type = 'none'
+        use_render_back = False
+        if background is not None and type(background) == str: # JA: If background is a string, set it as the type
+            background_type = background
+            use_render_back = True
+        pred_features, mask, depth, normals, render_cache = self.renderer.render_multiple_view_texture(
+            augmented_vertices,
+            self.mesh.faces,
+            self.face_attributes.repeat(batch_size, 1, 1, 1),
+            texture_img.repeat(batch_size, 1, 1, 1),
+            elev=theta,
+            azim=phi,
+            radius=radius,
+            look_at_height=self.dy,
+            render_cache=render_cache,
+            dims=dims,
+            background_type=background_type
+        )
+
+        mask = mask.detach()
+
+        if use_render_back:
+            pred_map = pred_features
+            pred_back = pred_features
+        else:
+            if background is None:
+                pred_back, _, _ = self.renderer.render_multiple_view(self.env_sphere,
                                                                    background_sphere_colors,
                                                                    elev=theta,
                                                                    azim=phi,
