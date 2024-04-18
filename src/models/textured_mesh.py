@@ -103,7 +103,8 @@ class TexturedMeshModel(nn.Module):
                  cache_path=None,
                  device=torch.device('cpu'),
                  augmentations=False,
-                 augment_prob=0.5):
+                 augment_prob=0.5,
+                 fovyangle=np.pi / 3):
 
         super().__init__()
         self.device = device
@@ -121,7 +122,7 @@ class TexturedMeshModel(nn.Module):
         self.num_features = 3
 
         self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
-                                 interpolation_mode=self.opt.texture_interpolation_mode)
+                                 interpolation_mode=self.opt.texture_interpolation_mode, fovyangle=fovyangle)
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
         self.background_sphere_colors, self.texture_img = self.init_paint() # JA: self.texture_img is a learnable parameter
@@ -206,7 +207,8 @@ class TexturedMeshModel(nn.Module):
         env_sphere = Mesh(env_sphere_path, self.device)
 
         mesh = Mesh(self.opt.shape_path, self.device)
-        mesh.normalize_mesh(inplace=True, target_scale=self.mesh_scale, dy=self.dy)
+        mesh.normalize_mesh(inplace=True, target_scale=self.mesh_scale, dy=self.dy) # JA: Normalize mesh into 1x1x1 cube.
+                                                                                    # target_scale is 0.6, dy is 0.25
 
         return env_sphere, mesh
 

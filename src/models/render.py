@@ -5,10 +5,10 @@ from loguru import logger
 class Renderer:
     # from https://github.com/threedle/text2mesh
 
-    def __init__(self, device, dim=(224, 224), interpolation_mode='nearest'):
+    def __init__(self, device, dim=(224, 224), interpolation_mode='nearest', fovyangle=np.pi / 3):
         assert interpolation_mode in ['nearest', 'bilinear', 'bicubic'], f'no interpolation mode {interpolation_mode}'
 
-        camera = kal.render.camera.generate_perspective_projection(np.pi / 3).to(device) # JA: This is the field of view
+        camera = kal.render.camera.generate_perspective_projection(fovyangle).to(device) # JA: This is the field of view
                                                                                         # It is currently set to 60deg.
 
         self.device = device
