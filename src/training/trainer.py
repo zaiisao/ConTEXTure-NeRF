@@ -416,6 +416,9 @@ class TEXTure:
                 viewpoint_data[viewpoint_index]["update_mask"] for viewpoint_index in range(len(viewpoint_data))
             ])
 
+            if i == 35:
+                self.mesh_model = self.init_mesh_model()
+
             self.project_back(
                 render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
                 object_mask=object_masks, update_mask=update_masks, z_normals=z_normals,
