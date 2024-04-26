@@ -48,6 +48,10 @@ class TEXTure:
         self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
         self.mesh_model = self.init_mesh_model()
         self.diffusion = self.init_diffusion()
+
+        if self.cfg.guide.use_zero123plus:
+            self.zero123plus = self.init_zero123plus()
+
         self.text_z, self.text_string = self.calc_text_embeddings()
         self.dataloaders = self.init_dataloaders()
         self.back_im = torch.Tensor(np.array(Image.open(self.cfg.guide.background_img).convert('RGB'))).to(
@@ -97,6 +101,20 @@ class TEXTure:
         for p in diffusion_model.parameters():
             p.requires_grad = False
         return diffusion_model
+    
+    def init_zero123plus(self) -> DiffusionPipeline:
+        pipeline = DiffusionPipeline.from_pretrained(
+            "sudo-ai/zero123plus-v1.1", custom_pipeline="sudo-ai/zero123plus-pipeline",
+            torch_dtype=torch.float16
+        )
+
+        pipeline.add_controlnet(ControlNetModel.from_pretrained(
+            "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
+        ), conditioning_scale=2)
+
+        pipeline.to(self.device)
+
+        return pipeline
 
     def calc_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
         ref_text = self.cfg.guide.text
@@ -150,7 +168,6 @@ class TEXTure:
         self.evaluate(self.dataloaders['val'], self.eval_renders_path)
         self.mesh_model.train()
 
-        render_outputs = []
         viewpoint_data = []
         depths_rgba = []
 
@@ -194,23 +211,18 @@ class TEXTure:
                 use_median=True
             )
 
-            render_outputs.append(outputs)
             viewpoint_data.append({
                 "render_outputs": outputs,
                 "update_mask": outputs["mask"]
             })
-        # END for i, data in enumerate(self.dataloaders['train'])
-
-        for data in viewpoint_data:
-            render_outputs = data["render_outputs"]
 
             # JA: In the depth controlled Zero123++ code example, the test depth map is found here:
             # https://d.skis.ltd/nrp/sample-data/0_depth.png
             # As it can be seen here, the foreground is closer to 0 (black) and background closer to 1 (white).
             # This is opposite of the SD 2.0 pipeline and the TEXTure internal renderer and must be inverted
             # (i.e. 1 minus the depth map, since the depth map is normalized to be between 0 and 1)
-            depth = 1 - render_outputs['depth']
-            mask = render_outputs['mask']
+            depth = 1 - outputs['depth']
+            mask = outputs['mask']
 
             # JA: The generated depth only has one channel, but the Zero123++ pipeline requires an RGBA image.
             # The mask is the object mask, such that the background has value of 0 and the foreground a value of 1.
@@ -228,29 +240,15 @@ class TEXTure:
             torch.cat((depths_rgba[3], depths_rgba[6]), dim=3),
         ), dim=2)
 
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.1", custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16
-        )
-        pipeline.add_controlnet(ControlNetModel.from_pretrained(
-            "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
-        ), conditioning_scale=2)
-        # Feel free to tune the scheduler
-        # pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-        #     pipeline.scheduler.config, timestep_spacing='trailing'
-        # )
-        pipeline.to(self.device)
-        # Run the pipeline
-
-        # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
-        cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond).resize((320, 320))
-
         # JA: From: https://pytorch.org/vision/main/generated/torchvision.transforms.ToPILImage.html
         # Converts a torch.*Tensor of shape C x H x W or a numpy ndarray of shape H x W x C to a PIL Image
         # while adjusting the value range depending on the mode.
         # From: https://www.geeksforgeeks.org/python-pil-image-resize-method/
         # Parameters: 
         # size – The requested size in pixels, as a 2-tuple: (width, height).
+
+        # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
+        cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond).resize((320, 320))
         depth_image = torchvision.transforms.functional.to_pil_image(depth_grid[0]).resize((640, 960))
 
         @torch.enable_grad
@@ -477,7 +475,7 @@ class TEXTure:
         # end of on_step_end_project_back
 
         # JA: Here we call the Zero123++ pipeline
-        result = pipeline(
+        result = self.zero123plus(
             cond_image,
             depth_image=depth_image,
             num_inference_steps=36,
@@ -491,6 +489,7 @@ class TEXTure:
         thetas, phis, radii = [], [], []
         update_masks = []
         rgb_outputs = []
+
         for i, data in enumerate(self.dataloaders['train']):
             if i == 0:
                 image = front_image
@@ -517,8 +516,7 @@ class TEXTure:
         outputs = self.mesh_model.render(theta=thetas, phi=phis, radius=radii, background=background)
 
         render_cache = outputs['render_cache'] # JA: All the render outputs have the shape of (1200, 1200)
-        rgb_render_raw = outputs['image']  # Render where missing values have special color
-        depth_render = outputs['depth']
+
         # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
         outputs = self.mesh_model.render(background=background,
                                         render_cache=render_cache, use_median=True)
@@ -527,15 +525,10 @@ class TEXTure:
         meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
                                             use_meta_texture=True, render_cache=render_cache)
 
-        z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1) # JA: Get the Z component of the face normal vectors relative to the camera
+        # JA: Get the Z component of the face normal vectors relative to the camera
+        z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
         z_normals_cache = meta_output['image'].clamp(0, 1)
-        edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
-
         object_mask = outputs['mask'] # JA: mask has a shape of 1200x1200
-
-        # fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
-        #                                     object_mask=object_mask, update_mask=update_masks, z_normals=z_normals,
-        #                                     z_normals_cache=z_normals_cache)
 
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
