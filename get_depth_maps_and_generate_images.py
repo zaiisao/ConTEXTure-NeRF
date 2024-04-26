@@ -447,6 +447,19 @@ guide:
 
             del trainer
 
+            front_view_image = predict(front_depth, prompt, 50, 1, 9.0, 0, 0, 1)[0]
+            depth_grid = None
+
+            for render in renders:
+                depth =render["depth"]
+                depth_grid = create_depth_grid()
+
+            pipeline.lload()
+
+            grid_output = zero123plus(front_view_image, depth_grid)
+
+
+
             for prompt in pair["prompts"]:
                 for render in renders:
                     # pipe = StableDiffusionDepth2ImgPipeline.from_pretrained(
