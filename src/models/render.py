@@ -64,12 +64,20 @@ class Renderer:
         assert (depth_maps.amax(dim=(1, 2)) <= 0).all(), 'depth map should be negative'
         object_mask = depth_maps != 0  # Mask for non-background pixels
 
-        # Avoid division by zero and ensure no invalid operations on empty depth map areas
-        min_depth = depth_maps.amin(dim=(1, 2), keepdim=True)
-        max_depth = depth_maps.amax(dim=(1, 2), keepdim=True)
-        range_depth = max_depth - min_depth
+        # To handle operations for masked regions, we need to use masked operations
+        # Set default min and max values to avoid affecting the normalization
+        masked_depth_maps = torch.where(object_mask, depth_maps, torch.tensor(float('inf')).to(depth_maps.device))
+        min_depth = masked_depth_maps.amin(dim=(1, 2), keepdim=True)[0]
 
-        # Prevent division by zero by setting range_depth to 1 where it is 0 (no object pixels)
+        masked_depth_maps = torch.where(object_mask, depth_maps, torch.tensor(-float('inf')).to(depth_maps.device))
+        max_depth = masked_depth_maps.amax(dim=(1, 2), keepdim=True)[0]
+
+        # Replace 'inf' with zeros in cases where no valid object pixels are found
+        min_depth[min_depth == float('inf')] = 0
+        max_depth[max_depth == -float('inf')] = 0
+
+        range_depth = max_depth - min_depth
+        # Prevent division by zero
         range_depth[range_depth == 0] = 1
 
         # Calculate normalized depth maps
@@ -188,7 +196,7 @@ class Renderer:
                 elev, azim, r=radius,
                 look_at_height=look_at_height
             )
-
+            # JA: Since the function prepare_vertices is specifically designed to move and project vertices to camera space and then index them with faces, the face normals returned by this function are also relative to the camera coordinate system. This follows from the context provided by the documentation, where the operations involve transforming vertices into camera coordinates, suggesting that the normals are computed in relation to these transformed vertices and thus would also be in camera coordinates.
             face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
                 verts, faces, self.camera_projection, camera_transform=camera_transform)
             # JA: face_vertices_camera[:, :, :, -1] likely refers to the z-component (depth component) of these coordinates, used both for depth mapping and for determining how textures map onto the surfaces during UV feature generation.
@@ -217,7 +225,17 @@ class Renderer:
         elif background_type == 'random':
             image_features += torch.rand((1,1,1,3)).to(self.device) * (1 - mask)
 
-        normals_image = face_normals[0][face_idx, :]
+        # JA: face_normals[0].shape:[14232, 3], face_idx.shape: [1, 1024, 1024]
+        # normals_image = face_normals[0][face_idx, :] # JA: normals_image: [1024, 1024, 3]
+        # Generate batch indices
+        batch_size = face_normals.shape[0]
+        batch_indices = torch.arange(batch_size).view(-1, 1, 1)
+
+        # Expand batch_indices to match the dimensions of face_idx
+        batch_indices = batch_indices.expand(-1, *face_idx.shape[1:])
+
+        # Use advanced indexing to gather the results
+        normals_image = face_normals[batch_indices, face_idx]
 
         render_cache = {'uv_features':uv_features, 'face_normals':face_normals,'face_idx':face_idx, 'depth_map':depth_map}
 
