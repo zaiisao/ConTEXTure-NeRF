@@ -1,5 +1,5 @@
 log:
-  exp_name: spiderman_0123plus_z_normal
+  exp_name: spiderman_0123plus_z_normal_blend
 guide:
   text: "A photo of Spiderman, {} view"
   append_direction: True
