@@ -229,8 +229,12 @@ class TEXTure:
             depth_rgba = torch.cat((depth, depth, depth, mask), dim=1)
             depths_rgba.append(depth_rgba)
 
-        zero123plus_cond = pad_tensor_to_size(self.zero123_front_input[0], 1200, 1200, value=1) # JA: pad the front view image with ones so that the resulting image will be 1200x1200. This makes the background white
-                                                                                                # This is new code. zero123_front_input is the cropped version. In control zero123 pipeline, zero123_front_input is used without padding
+        min_h, min_w, max_h, max_w = utils.get_nonzero_region(object_mask_front[0, 0])
+        crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
+        cropped_front_image = crop(front_image)
+
+        zero123plus_cond = pad_tensor_to_size(cropped_front_image, 1200, 1200, value=1) # JA: pad the front view image with ones so that the resulting image will be 1200x1200. This makes the background white
+                                                                                                # This is new code. cropped_front_image is the cropped version. In control zero123 pipeline, zero123_front_input is used without padding
 
         # JA: depths_rgba is a list that arranges the rows of the depth map, row by row
         # These depths are not cropped versions
