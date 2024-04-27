@@ -297,7 +297,7 @@ class TexturedMeshModel(nn.Module):
 
     def get_params(self):
         # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
-        return [self.texture_img, self.meta_texture_img]    # JA: In our experiment, self.background_sphere_colors
+        return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function
 
     @torch.no_grad()

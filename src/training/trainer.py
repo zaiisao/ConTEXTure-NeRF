@@ -252,7 +252,7 @@ class TEXTure:
         # size – The requested size in pixels, as a 2-tuple: (width, height).
 
         # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
-        cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond).resize((320, 320))
+        cond_image = torchvision.transforms.functional.to_pil_image(zero123plus_cond[0]).resize((320, 320))
         depth_image = torchvision.transforms.functional.to_pil_image(depth_grid[0]).resize((640, 960))
 
         @torch.enable_grad
@@ -340,7 +340,10 @@ class TEXTure:
                 noise = torch.randn_like(gt_latents)
                 noised_truth = pipeline.scheduler.add_noise(gt_latents, noise, t[None])
 
-                blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask) # JA: latent will be unscaled after generation. To make noised_truth unscaled as well, we scale them.
+                # JA: latent will be unscaled after generation. To make noised_truth unscaled as well, we scale them.
+                # This blending equation is originally from TEXTure
+                blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask) 
+
                 blended_latents.append(blended_latent) # blended_latent = latent * curr_mask + noised_truth * (1 - curr_mask)
             
             callback_kwargs["latents"] = torch.cat((
@@ -350,133 +353,6 @@ class TEXTure:
             ), dim=2).half()
 
             return callback_kwargs
-
-        def on_step_end_project_back(pipeline, i, t, callback_kwargs):
-            grid_latent = callback_kwargs["latents"]
-
-            check_mask_iters = 0.5
-
-            latents = split_zero123plus_grid(grid_latent, 320 // pipeline.vae_scale_factor)
-            blended_latents = []
-            rgb_outputs = []
-
-            thetas, phis, radii = [], [], []
-
-            for viewpoint_index, data in enumerate(self.dataloaders['train']):
-                if viewpoint_index == 0:
-                    continue
-
-                theta, phi, radius = data['theta'], data['phi'], data['radius']
-                phi = phi - np.deg2rad(self.cfg.render.front_offset)
-                phi = float(phi + 2 * np.pi if phi < 0 else phi)
-
-                thetas.append(theta)
-                phis.append(phi)
-                radii.append(radius)
-
-            # JA: The following render uses the texture atlas inferred by the previous invocation of project_back
-            outputs = self.mesh_model.render(theta=thetas, phi=phis, radius=radii, background=background)
-            render_cache = outputs['render_cache']
-            # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
-            outputs = self.mesh_model.render(
-                background=torch.Tensor([0.5, 0.5, 0.5]).to(self.device),
-                render_cache=render_cache,
-                use_median=i > 0
-            )
-
-            object_masks = outputs['mask']
-            # rgb_render = outputs['image']
-            # Render meta texture map
-            # meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
-            #                                     use_meta_texture=True, render_cache=render_cache)
-            # z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
-            # z_normals_cache = meta_output['image'].clamp(0, 1)
-
-            for viewpoint_index, data in enumerate(self.dataloaders['train']):
-                if viewpoint_index == 0:
-                    continue
-
-                image_row_index = (viewpoint_index - 1) % 3
-                image_col_index = (viewpoint_index - 1) // 3
-
-                latent = latents[image_row_index][image_col_index]
-
-                # object_mask = outputs['mask'][viewpoint_index] # JA: mask has a shape of 1200x1200
-                # rgb_render = outputs['image'][viewpoint_index - 1][None] # JA: rgb_render is needed for blending the latent image with the ground truth rendered image
-                # rgb_render_small = F.interpolate(rgb_render, (320, 320), mode='bilinear', align_corners=False)
-                # gt_latents = pipeline.vae.encode(
-                #     rgb_render_small.half(),
-                #     return_dict=False
-                # )[0].sample() * pipeline.vae.config.scaling_factor
-                # noise = torch.randn_like(gt_latents)
-                # noised_truth = pipeline.scheduler.add_noise(gt_latents, noise, t[None])
-
-                # update_mask = viewpoint_data[viewpoint_index - 1]["update_mask"] # viewpoint_data[viewpoint_index - 1]["render_"]
-                # refine_mask = viewpoint_data[viewpoint_index - 1]["refine_mask"]
-                # generate_mask = viewpoint_data[viewpoint_index - 1]["generate_mask"]
-                # check_mask = self.generate_checkerboard(update_mask, refine_mask, generate_mask)
-
-                # if check_mask is not None and i < int(pipeline.num_timesteps * check_mask_iters):
-                #     curr_mask = F.interpolate(
-                #         check_mask,
-                #         (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
-                #         mode='nearest'
-                #     )
-                # else:
-                #     curr_mask = F.interpolate(
-                #         update_mask,
-                #         (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
-                #         mode='nearest'
-                #     )
-
-                # curr_mask = F.interpolate(
-                #     update_mask,
-                #     (320 // pipeline.vae_scale_factor, 320 // pipeline.vae_scale_factor),
-                #     mode='nearest'
-                # )
-
-                def scale_latents(latents):
-                    latents = (latents - 0.22) * 0.75
-                    return latents
-
-                blended_latent = latent #* curr_mask + scale_latents(noised_truth) * (1 - curr_mask)
-                blended_latents.append(blended_latent)
-
-                rgb_output = F.interpolate(
-                    pipeline.vae.decode(blended_latent.half() / pipeline.vae.config.scaling_factor, return_dict=False)[0],
-                    (1200, 1200),
-                    mode='bilinear',
-                    align_corners=False
-                )
-
-                rgb_outputs.append(rgb_output)
-
-            # end of train dataloader for loop
-
-            # num_epochs = num_epochs = int(200 * (i + 1) / 36)
-
-            # update_masks = torch.cat([
-            #     viewpoint_data[viewpoint_index]["update_mask"] for viewpoint_index in range(len(viewpoint_data))
-            # ])
-
-            # self.project_back(
-            #     render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
-            #     object_mask=object_masks, update_mask=update_masks, z_normals=z_normals,
-            #     z_normals_cache=z_normals_cache
-            # )
-            self.project_back(
-                render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
-                object_mask=object_masks, update_mask=object_masks, z_normals=None, z_normals_cache=None
-            )
-            
-            callback_kwargs["latents"] = torch.cat((
-                torch.cat((blended_latents[0], blended_latents[3]), dim=3),
-                torch.cat((blended_latents[1], blended_latents[4]), dim=3),
-                torch.cat((blended_latents[2], blended_latents[5]), dim=3),
-            ), dim=2).half()
-
-            return callback_kwargs
-        # end of on_step_end_project_back
 
         # JA: Here we call the Zero123++ pipeline
         result = self.zero123plus(
