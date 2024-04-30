@@ -5,9 +5,4 @@ guide:
   append_direction: True
   shape_path: shapes/human.obj
   guidance_scale: 10
-  # second_model_type: "control_zero123"
   use_zero123plus: True
-
-  # individual_control_of_conditions: True
-  # guidance_scale_i: 5
-  # guidance_scale_t: 1
