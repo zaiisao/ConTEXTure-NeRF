@@ -500,6 +500,7 @@ class TEXTure:
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache
+            #face_normals, face_ids
         )
 
         self.mesh_model.change_default_to_median()
@@ -974,7 +975,9 @@ class TEXTure:
         
     def project_back_only_texture_atlas(self, render_cache: Dict[str, Any], background: Any, rgb_output: torch.Tensor,
                      object_mask: torch.Tensor, update_mask: torch.Tensor, z_normals: torch.Tensor,
-                     z_normals_cache: torch.Tensor):
+                     z_normals_cache: torch.Tensor
+                     #, face_normals: torch.Tensor, face_ids:torch.Tensor
+                     ):
         eroded_masks = []
         for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
             eroded_mask = cv2.erode(object_mask[i, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))
