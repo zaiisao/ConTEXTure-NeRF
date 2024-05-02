@@ -268,15 +268,25 @@ class TEXTure:
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
         cropped_front_image = crop(front_image)
 
+        should_pad = False
+
         # JA: We have to pad the depth tensors because cropped images from all viewpoints will vary in size from each
         # other. Without the padding, the tensors will not be concatenatable.
         for i, cropped_depth_rgba in enumerate(cropped_depths_rgba):
-            cropped_depths_rgba[i] = pad_tensor_to_size(
-                cropped_depth_rgba,
-                max_cropped_image_height,
-                max_cropped_image_width,
-                value=0
-            )
+            if should_pad:
+                cropped_depths_rgba[i] = pad_tensor_to_size(
+                    cropped_depth_rgba,
+                    max_cropped_image_height,
+                    max_cropped_image_width,
+                    value=0
+                )
+            else:
+                cropped_depths_rgba[i] = F.interpolate(
+                    cropped_depth_rgba,
+                    (max_cropped_image_height, max_cropped_image_width),
+                    mode='bilinear',
+                    align_corners=False
+                )
 
         # JA: cropped_depths_rgba is a list that arranges the rows of the depth map, row by row
         cropped_depth_grid = torch.cat((
@@ -320,12 +330,16 @@ class TEXTure:
 
                 min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
                 crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-                cropped_rgb_render_raw = pad_tensor_to_size(
-                    crop(outputs['image']),
-                    max_cropped_image_height,
-                    max_cropped_image_width,
-                    value=0.5
-                )
+
+                if should_pad:
+                    cropped_rgb_render_raw = pad_tensor_to_size(
+                        crop(outputs['image']),
+                        max_cropped_image_height,
+                        max_cropped_image_width,
+                        value=0.5
+                    )
+                else:
+                    cropped_rgb_render_raw = crop(outputs['image'])
 
                 render_cache = outputs['render_cache']
                 outputs = self.mesh_model.render(
@@ -334,12 +348,15 @@ class TEXTure:
                     use_median=True
                 )
 
-                cropped_rgb_render = pad_tensor_to_size(
-                    crop(outputs['image']),
-                    max_cropped_image_height,
-                    max_cropped_image_width,
-                    value=0.5
-                )
+                if should_pad:
+                    cropped_rgb_render = pad_tensor_to_size(
+                        crop(outputs['image']),
+                        max_cropped_image_height,
+                        max_cropped_image_width,
+                        value=0.5
+                    )
+                else:
+                    cropped_rgb_render = crop(outputs['image'])
 
                 image_row_index = (viewpoint_index - 1) % 3
                 image_col_index = (viewpoint_index - 1) // 3
@@ -442,20 +459,28 @@ class TEXTure:
                 min_h, min_w = nonzero_region["min_h"], nonzero_region["min_w"]
                 max_h, max_w = nonzero_region["max_h"], nonzero_region["max_w"]
 
-                padding_size = (cropped_rgb_output.shape[-1] - cropped_depth_sizes[i]) // 2
-                if padding_size > 0:
-                    # JA: All the target depths and the corresponding results have a padding used to set the image size
-                    # match the image size of the largest depth tensor. This padding must be removed so that we can
-                    # ensure pixelwise alignment with other tensors upon extending the cropped tensor.
-                    nonpadded_area_start_h, nonpadded_area_start_w = padding_size, padding_size
-                    nonpadded_area_end_h = nonpadded_area_start_h + (max_h - min_h)
-                    nonpadded_area_end_w = nonpadded_area_start_w + (max_w - min_w)
+                if should_pad:
+                    padding_size = (cropped_rgb_output.shape[-1] - cropped_depth_sizes[i]) // 2
+                    if padding_size > 0:
+                        # JA: All the target depths and the corresponding results have a padding used to set the image size
+                        # match the image size of the largest depth tensor. This padding must be removed so that we can
+                        # ensure pixelwise alignment with other tensors upon extending the cropped tensor.
+                        nonpadded_area_start_h, nonpadded_area_start_w = padding_size, padding_size
+                        nonpadded_area_end_h = nonpadded_area_start_h + (max_h - min_h)
+                        nonpadded_area_end_w = nonpadded_area_start_w + (max_w - min_w)
 
-                    cropped_rgb_output = cropped_rgb_output[
-                        :, :,
-                        nonpadded_area_start_h:nonpadded_area_end_h,
-                        nonpadded_area_start_w:nonpadded_area_end_w
-                    ]
+                        cropped_rgb_output = cropped_rgb_output[
+                            :, :,
+                            nonpadded_area_start_h:nonpadded_area_end_h,
+                            nonpadded_area_start_w:nonpadded_area_end_w
+                        ]
+                else:
+                    cropped_rgb_output = F.interpolate(
+                        cropped_rgb_output,
+                        (max_h - min_h, max_w - min_w),
+                        mode='bilinear',
+                        align_corners=False
+                    )
 
                 # JA: We initialize rgb_output, the image where cropped_rgb_output will be "pasted into." Since the
                 # renderer produces tensors (depth maps, object mask, etc.) with a height and width of 1200, rgb_output
@@ -1003,6 +1028,10 @@ class TEXTure:
         render_update_mask = blurred_render_update_mask
         for i in range(rgb_output.shape[0]):
             self.log_train_image(rgb_output[i][None] * render_update_mask[i][None], f'project_back_input_{i}')
+            self.log_train_image(
+                torch.cat((z_normals[i][None], z_normals[i][None], z_normals[i][None]), dim=1),
+                f'project_back_z_normals_{i}'
+            )
 
         optimizer = torch.optim.Adam(self.mesh_model.get_params(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
@@ -1013,18 +1042,23 @@ class TEXTure:
         # between the specific image and the rendered image, rendered using the current estimate
         # of the texture atlas.
         # losses = []
-        for _ in tqdm(range(200), desc='fitting mesh colors'):
-            optimizer.zero_grad()
-            outputs = self.mesh_model.render(background=background,
-                                             render_cache=render_cache)
-            rgb_render = outputs['image']
 
-            # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
-            loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
+        # JA: TODO: Add num_epochs hyperparameter
+        with tqdm(range(200), desc='fitting mesh colors') as pbar:
+            for i in pbar:
+                optimizer.zero_grad()
+                outputs = self.mesh_model.render(background=background,
+                                                render_cache=render_cache)
+                rgb_render = outputs['image']
 
-            loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
-                            # the network, that is, the pixel value of the texture atlas
-            optimizer.step()
+                # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
+
+                loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
+                                # the network, that is, the pixel value of the texture atlas
+                optimizer.step()
+
+                pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
 
         return rgb_render
 
