@@ -146,6 +146,122 @@ class TexturedMeshModel(nn.Module):
         self._L = None
         self._eigenvalues = None
         self._eigenvectors = None
+        
+        #MJ: Create the mask for each view based on the value of the z-normals
+        
+       # Set the camera poses:
+        self.thetas = []
+        self.phis = []
+        self.radii = []
+       
+        for i, data in enumerate(self.dataloaders['train']):
+           
+            theta, phi, radius = data['theta'], data['phi'], data['radius']
+            phi = phi - np.deg2rad(self.cfg.render.front_offset)
+            phi = float(phi + 2 * np.pi if phi < 0 else phi)
+
+            self.thetas.append(theta)
+            self.phis.append(phi)
+            self.radii.append(radius)
+
+        if self.augmentations:
+            augmented_vertices = self.augment_vertices()
+        else:
+            augmented_vertices = self.mesh.vertices
+        
+        background_type = 'none'
+        use_render_back = False
+        batch_size = 7
+        # JA: We need to repeat several tensors to support the batch size.
+        # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
+        # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
+        mask, depth_map, normals_image,face_normals,face_idx = self.render_face_normals_face_idx(
+            augmented_vertices[None].repeat(batch_size, 1, 1),
+            self.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
+            self.face_attributes.repeat(batch_size, 1, 1, 1),
+            elev=self.thetas,
+            azim=self.phis,
+            radius= self.radii,
+            look_at_height=self.dy,
+         
+            dims=self.cfg.guide.train_grid_size, # MJ: 1200,
+            background_type=background_type
+        )
+        
+        self.mask = mask #MJ: object_mask of the mesh
+        self.depth_map = depth_map
+        self.normals_image = normals_image
+        self.face_normals = face_normals
+        self.face_idx = face_idx
+        
+        #MJ: get the binary masks for each view which indicates how much the image rendered from each view
+        #should contribute to the texture atlas over the mesh which is the cause of the image
+        
+        self.weight_masks = self.get_weight_masks_for_views( self.face_normals, self.face_idx )
+        
+    def get_weight_masks_for_views(self, face_normals, face_idx ):
+        
+        #For the veiwed region of the mesh under each view, find the overlapping with the neighbor regions under
+        # different views. Two viewed regions of the mesh are overlapped if the face_idx of them are the same
+        
+        weight_masks = torch.full( face_idx.shape, True) 
+        #MJ: face_idx: shape = (B,1,H,W); 
+        # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
+        
+        #face_normals: shape = (B, 3, num_faces); face_normals[:,:, k] refers to the face normal vectors of face idx = k
+        #MJ: weight_masks[b,0,i,j] indicates whether the face_idx[b,0,i,j] of  pixel (i,j) under view b should contribute to the texture atlas;
+        #initialized to True by torch.full( face_idx.shape, True): It will be set to False 
+        # when  face_idx[b,0,i,j] does not have the maximum z-normal among all the views. 
+        
+        num_of_views = face_idx.shape[0] #MJ: from 0 to 6
+        for v1 in range (  num_of_views  ):
+              for v2 in range (  num_of_views  ):
+                  if v1 != v2: #Compare with only neighbor views:
+                    #  If the z_normals of v1 is less than that of any other view, the weight mask of v1 is set to False
+                    weight_masks[v1] = not ( face_normals[v1,:, face_idx][2] < face_normals[v2,:, face_idx][2] )
+                    #  face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j)  
+        
+        return weight_masks
+        
+    def render_face_normals_face_idx(self, verts, faces, uv_face_attr, elev, azim, radius,
+                                   look_at_height=0.0, dims=None, background_type='none'):
+        dims = self.dim if dims is None else dims
+       
+        camera_transform = self.get_camera_from_multiple_view(
+            elev, azim, r=radius,
+            look_at_height=look_at_height
+        )
+        # JA: Since the function prepare_vertices is specifically designed to move and project vertices to camera space and then index them with faces, the face normals returned by this function are also relative to the camera coordinate system. This follows from the context provided by the documentation, where the operations involve transforming vertices into camera coordinates, suggesting that the normals are computed in relation to these transformed vertices and thus would also be in camera coordinates.
+        face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
+            verts, faces, self.camera_projection, camera_transform=camera_transform)
+        # JA: face_vertices_camera[:, :, :, -1] likely refers to the z-component (depth component) of these coordinates, used both for depth mapping and for determining how textures map onto the surfaces during UV feature generation.
+        depth_map, _ = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
+                                                            face_vertices_image, face_vertices_camera[:, :, :, -1:]) 
+        depth_map = self.normalize_multiple_depth(depth_map)
+
+        uv_features, face_idx = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
+            face_vertices_image, uv_face_attr)
+        uv_features = uv_features.detach()
+    
+        mask = (face_idx > -1).float()[..., None]
+
+        # JA: face_normals[0].shape:[14232, 3], face_idx.shape: [1, 1024, 1024]
+        # normals_image = face_normals[0][face_idx, :] # JA: normals_image: [1024, 1024, 3]
+        # Generate batch indices
+        batch_size = face_normals.shape[0]
+        batch_indices = torch.arange(batch_size).view(-1, 1, 1)
+
+        # Expand batch_indices to match the dimensions of face_idx
+        batch_indices = batch_indices.expand(-1, *face_idx.shape[1:])
+
+        # Use advanced indexing to gather the results
+        normals_image = face_normals[batch_indices, face_idx]
+
+       
+        return mask.permute(0, 3, 1, 2), depth_map.permute(0, 3, 1, 2), normals_image.permute(0, 3, 1, 2), \
+               face_normals.permute(0, 3, 1, 2), face_idx.permute(0, 3, 1, 2)
+
+
 
     @property
     def L(self) -> np.ndarray:
