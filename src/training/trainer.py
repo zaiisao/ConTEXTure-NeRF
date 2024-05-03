@@ -97,10 +97,7 @@ class TEXTure:
             self.phis.append(phi)
             self.radii.append(radius)
 
-        if self.augmentations:
-            augmented_vertices = self.mesh_model.augment_vertices()
-        else:
-            augmented_vertices = self.mesh_model.vertices
+        augmented_vertices = self.mesh_model.mesh.vertices
         
         background_type = 'none'
         use_render_back = False
@@ -108,16 +105,16 @@ class TEXTure:
         # JA: We need to repeat several tensors to support the batch size.
         # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
         # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
-        mask, depth_map, normals_image,face_normals,face_idx = self.render_face_normals_face_idx(
+        mask, depth_map, normals_image,face_normals,face_idx = self.mesh_model.render_face_normals_face_idx(
             augmented_vertices[None].repeat(batch_size, 1, 1),
-            self.mesh_model.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
+            self.mesh_model.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.mesh_model.face_attributes.repeat(batch_size, 1, 1, 1),
-            elev=self.thetas,
-            azim=self.phis,
-            radius= self.radii,
-            look_at_height=self.dy,
+            elev=torch.tensor(self.thetas).to(self.device),
+            azim=torch.tensor(self.phis).to(self.device),
+            radius=torch.tensor(self.radii).to(self.device),
+            look_at_height=self.mesh_model.dy,
          
-            dims=self.cfg.guide.train_grid_size, # MJ: 1200,
+            # dims=self.cfg.render.train_grid_size, # MJ: 1200,
             background_type=background_type
         )
         
@@ -130,32 +127,87 @@ class TEXTure:
         #MJ: get the binary masks for each view which indicates how much the image rendered from each view
         #should contribute to the texture atlas over the mesh which is the cause of the image
         
-        self.weight_masks = self.get_weight_masks_for_views( self.face_normals, self.face_idx )
+        #MJ use two versions and compare:
+        # self.weight_masks = self.get_weight_masks_for_views_vectorized( self.face_normals, self.face_idx )
+        self.weight_masks =  self.get_weight_masks_for_views_ij_loop(self, face_normals, face_idx )
         
-    def get_weight_masks_for_views(self, face_normals, face_idx ):
+    def get_weight_masks_for_views_ij_loop(self, face_normals, face_idx ):
         
-        #For the veiwed region of the mesh under each view, find the overlapping with the neighbor regions under
-        # different views. Two viewed regions of the mesh are overlapped if the face_idx of them are the same
-        
-        weight_masks = torch.full( face_idx.shape, True) 
+               
         #MJ: face_idx: shape = (B,1,H,W); 
         # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
         
-        #face_normals: shape = (B, 3, num_faces); face_normals[:,:, k] refers to the face normal vectors of face idx = k
+        #face_normals: shape = (B, 3, num_faces); face_normals[v,:, k] refers to the face normal vectors of face idx = k under view v;
+                                   
+        #face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j) 
         #MJ: weight_masks[b,0,i,j] indicates whether the face_idx[b,0,i,j] of  pixel (i,j) under view b should contribute to the texture atlas;
-        #initialized to True by torch.full( face_idx.shape, True): It will be set to False 
-        # when  face_idx[b,0,i,j] does not have the maximum z-normal among all the views. 
+        #initialized to True by torch.full( face_idx.shape, True):  
         
-        num_of_views = face_idx.shape[0] #MJ: from 0 to 6
-        for v1 in range (  num_of_views  ):
-              for v2 in range (  num_of_views  ):
-                  if v1 != v2: #Compare with only neighbor views:
-                    #  If the z_normals of v1 is less than that of any other view, the weight mask of v1 is set to False
-                    weight_masks[v1] = not ( face_normals[v1,:, face_idx][2] < face_normals[v2,:, face_idx][2] )
-                    #  face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j)  
-        
+        num_of_views = face_idx.shape[0] #MJ: The total num of views: from 0 to 6
+        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool)  # face_idx.shape:  (B,1, H, W)
+
+       # Iterate over each pixel in the HxW grid
+        for i in range ( face_idx.shape[2] ):
+          for j in range (face_idx.shape[3]):
+            for v1 in range (num_of_views):
+              for v2 in range (num_of_views):
+                  if v1 != v2: #Ensure different views are compared
+                    #Check if
+                    # face_normals[v1,2, face_idx[v1,0,i,j]] >= face_normals[v2,2, face_idx[v2,0]],
+                    # where face_idx[v1,0,i,j] = face_idx[v2,0]  
+                    # When you write c1[i, j] == c2, you are performing an element-wise comparison between a single value from the tensor c1 at position [i, j])
+                    # and each element in the tensor c2 [broadcasting]
+                    
+                    # Get the face index for the current view and pixel
+                    face_index_v1_ij = face_idx[v1, 0, i, j]
+                    face_index_v2 = face_idx[v2, 0]
+                    # Check if the face indices are the same and compare their z-normals
+                    if face_index_v1_ij == face_index_v2: #MJ: broadcasting is done?
+                        z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
+                        z_normal_v2 = face_normals[v2, 2, face_index_v2]
+                                
+                    #MJ: matches will have the same shape of face_idx[v2,0] = (H,W)          
+                    # If the z-normal of pixel (i,j), with face_idx[v1,0,i,j]  in v1 is less than that of any pixel in any other viewpoint v2 
+                    # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, because some worthy pixel exists in other viewpoints
+                        if z_normal_v1_ij <  z_normal_v2:   #MJ: broadcasting is done?                        
+                           weight_masks[v1, 0, i, j] = False
+                           break #MJ: Exit the loop earlier because we have found a higher z-normal:
+                            # if pixel (i,j) in v1 is not worthy to contribute in comparison with some other pixels in any view v2,
+                            # we do not need to compare (i,j) in v1 to pixels in any other viewpoints than v2; The existence
+                            # of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy:
+    
+
         return weight_masks
-        
+
+
+    def get_weight_masks_for_views_vectorized(self, face_normals, face_idx ):
+    # Assuming face_idx and face_normals are defined as described:
+    # face_idx: shape = (B, 1, H, W); 
+    # face_normals: shape = (B, 3, num_faces); 
+
+        num_views = face_idx.shape[0]
+        H, W = face_idx.shape[2], face_idx.shape[3]
+        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool)
+
+        # Iterate over each pair of views
+        for v1 in range(num_views):
+            for v2 in range(num_views):
+                if v1 != v2:
+                    # Retrieve all normals for current view v1 based on face indices
+                    normals_v1 = face_normals[v1, 2, face_idx[v1, 0].long()]  # shape (1, H, W)
+
+                    # Retrieve all normals for view v2, same indexing approach
+                    normals_v2 = face_normals[v2, 2, face_idx[v2, 0].long()]  # shape (1, H, W)
+
+                    # Create mask where face_idx are equal and normals_v1 are not greater
+                    same_face = face_idx[v1, 0] == face_idx[v2, 0]  # Broadcasting, shape (1, H, W)
+                    lower_normal = normals_v1 < normals_v2           # element-wise comparison, shape (1, H, W)
+
+                    # Update weight_masks where the same face has a lower normal in v1 compared to any v2
+                    weight_masks[v1, 0] &= ~(same_face & lower_normal)  # Invert and update mask
+
+        return weight_masks
+
 
     def init_mesh_model(self) -> nn.Module:
         # fovyangle = np.pi / 6 if self.cfg.guide.use_zero123plus else np.pi / 3
@@ -346,15 +398,25 @@ class TEXTure:
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
         cropped_front_image = crop(front_image)
 
+        should_pad = False
+
         # JA: We have to pad the depth tensors because cropped images from all viewpoints will vary in size from each
         # other. Without the padding, the tensors will not be concatenatable.
         for i, cropped_depth_rgba in enumerate(cropped_depths_rgba):
-            cropped_depths_rgba[i] = pad_tensor_to_size(
-                cropped_depth_rgba,
-                max_cropped_image_height,
-                max_cropped_image_width,
-                value=0
-            )
+            if should_pad:
+                cropped_depths_rgba[i] = pad_tensor_to_size(
+                    cropped_depth_rgba,
+                    max_cropped_image_height,
+                    max_cropped_image_width,
+                    value=0
+                )
+            else:
+                cropped_depths_rgba[i] = F.interpolate(
+                    cropped_depth_rgba,
+                    (max_cropped_image_height, max_cropped_image_width),
+                    mode='bilinear',
+                    align_corners=False
+                )
 
         # JA: cropped_depths_rgba is a list that arranges the rows of the depth map, row by row
         cropped_depth_grid = torch.cat((
@@ -398,12 +460,16 @@ class TEXTure:
 
                 min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
                 crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-                cropped_rgb_render_raw = pad_tensor_to_size(
-                    crop(outputs['image']),
-                    max_cropped_image_height,
-                    max_cropped_image_width,
-                    value=0.5
-                )
+
+                if should_pad:
+                    cropped_rgb_render_raw = pad_tensor_to_size(
+                        crop(outputs['image']),
+                        max_cropped_image_height,
+                        max_cropped_image_width,
+                        value=0.5
+                    )
+                else:
+                    cropped_rgb_render_raw = crop(outputs['image'])
 
                 render_cache = outputs['render_cache']
                 outputs = self.mesh_model.render(
@@ -412,12 +478,15 @@ class TEXTure:
                     use_median=True
                 )
 
-                cropped_rgb_render = pad_tensor_to_size(
-                    crop(outputs['image']),
-                    max_cropped_image_height,
-                    max_cropped_image_width,
-                    value=0.5
-                )
+                if should_pad:
+                    cropped_rgb_render = pad_tensor_to_size(
+                        crop(outputs['image']),
+                        max_cropped_image_height,
+                        max_cropped_image_width,
+                        value=0.5
+                    )
+                else:
+                    cropped_rgb_render = crop(outputs['image'])
 
                 image_row_index = (viewpoint_index - 1) % 3
                 image_col_index = (viewpoint_index - 1) // 3
@@ -520,20 +589,28 @@ class TEXTure:
                 min_h, min_w = nonzero_region["min_h"], nonzero_region["min_w"]
                 max_h, max_w = nonzero_region["max_h"], nonzero_region["max_w"]
 
-                padding_size = (cropped_rgb_output.shape[-1] - cropped_depth_sizes[i]) // 2
-                if padding_size > 0:
-                    # JA: All the target depths and the corresponding results have a padding used to set the image size
-                    # match the image size of the largest depth tensor. This padding must be removed so that we can
-                    # ensure pixelwise alignment with other tensors upon extending the cropped tensor.
-                    nonpadded_area_start_h, nonpadded_area_start_w = padding_size, padding_size
-                    nonpadded_area_end_h = nonpadded_area_start_h + (max_h - min_h)
-                    nonpadded_area_end_w = nonpadded_area_start_w + (max_w - min_w)
+                if should_pad:
+                    padding_size = (cropped_rgb_output.shape[-1] - cropped_depth_sizes[i]) // 2
+                    if padding_size > 0:
+                        # JA: All the target depths and the corresponding results have a padding used to set the image size
+                        # match the image size of the largest depth tensor. This padding must be removed so that we can
+                        # ensure pixelwise alignment with other tensors upon extending the cropped tensor.
+                        nonpadded_area_start_h, nonpadded_area_start_w = padding_size, padding_size
+                        nonpadded_area_end_h = nonpadded_area_start_h + (max_h - min_h)
+                        nonpadded_area_end_w = nonpadded_area_start_w + (max_w - min_w)
 
-                    cropped_rgb_output = cropped_rgb_output[
-                        :, :,
-                        nonpadded_area_start_h:nonpadded_area_end_h,
-                        nonpadded_area_start_w:nonpadded_area_end_w
-                    ]
+                        cropped_rgb_output = cropped_rgb_output[
+                            :, :,
+                            nonpadded_area_start_h:nonpadded_area_end_h,
+                            nonpadded_area_start_w:nonpadded_area_end_w
+                        ]
+                else:
+                    cropped_rgb_output = F.interpolate(
+                        cropped_rgb_output,
+                        (max_h - min_h, max_w - min_w),
+                        mode='bilinear',
+                        align_corners=False
+                    )
 
                 # JA: We initialize rgb_output, the image where cropped_rgb_output will be "pasted into." Since the
                 # renderer produces tensors (depth maps, object mask, etc.) with a height and width of 1200, rgb_output
@@ -1084,6 +1161,10 @@ class TEXTure:
         render_update_mask = blurred_render_update_mask
         for i in range(rgb_output.shape[0]):
             self.log_train_image(rgb_output[i][None] * render_update_mask[i][None], f'project_back_input_{i}')
+            self.log_train_image(
+                torch.cat((z_normals[i][None], z_normals[i][None], z_normals[i][None]), dim=1),
+                f'project_back_z_normals_{i}'
+            )
 
         optimizer = torch.optim.Adam(self.mesh_model.get_params(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
@@ -1094,20 +1175,24 @@ class TEXTure:
         # between the specific image and the rendered image, rendered using the current estimate
         # of the texture atlas.
         # losses = []
-        for _ in tqdm(range(200), desc='fitting mesh colors'):
-            optimizer.zero_grad()
-            outputs = self.mesh_model.render(background=background,
-                                             render_cache=render_cache)
-            rgb_render = outputs['image']
 
-            # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
-            #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
-            #BY MJ:
-            
-            loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
-            loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
-                            # the network, that is, the pixel value of the texture atlas
-            optimizer.step()
+        # JA: TODO: Add num_epochs hyperparameter
+        with tqdm(range(200), desc='fitting mesh colors') as pbar:
+            for i in pbar:
+                optimizer.zero_grad()
+                outputs = self.mesh_model.render(background=background,
+                                                render_cache=render_cache)
+                rgb_render = outputs['image']
+
+                # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                #BY MJ:
+                loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
+                                # the network, that is, the pixel value of the texture atlas
+                optimizer.step()
+
+                pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
 
         return rgb_render
 

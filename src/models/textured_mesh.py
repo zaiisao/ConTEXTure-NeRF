@@ -121,7 +121,9 @@ class TexturedMeshModel(nn.Module):
         self.cache_path = cache_path
         self.num_features = 3
 
-        self.renderer = Renderer(device=self.device, dim=(render_grid_size, render_grid_size),
+        self.dim = (render_grid_size, render_grid_size)
+
+        self.renderer = Renderer(device=self.device, dim=self.dim,
                                  interpolation_mode=self.opt.texture_interpolation_mode, fovyangle=fovyangle)
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
@@ -227,17 +229,17 @@ class TexturedMeshModel(nn.Module):
                                    look_at_height=0.0, dims=None, background_type='none'):
         dims = self.dim if dims is None else dims
        
-        camera_transform = self.get_camera_from_multiple_view(
+        camera_transform = self.renderer.get_camera_from_multiple_view(
             elev, azim, r=radius,
             look_at_height=look_at_height
         )
         # JA: Since the function prepare_vertices is specifically designed to move and project vertices to camera space and then index them with faces, the face normals returned by this function are also relative to the camera coordinate system. This follows from the context provided by the documentation, where the operations involve transforming vertices into camera coordinates, suggesting that the normals are computed in relation to these transformed vertices and thus would also be in camera coordinates.
         face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
-            verts, faces, self.camera_projection, camera_transform=camera_transform)
+            verts, faces, self.renderer.camera_projection, camera_transform=camera_transform)
         # JA: face_vertices_camera[:, :, :, -1] likely refers to the z-component (depth component) of these coordinates, used both for depth mapping and for determining how textures map onto the surfaces during UV feature generation.
         depth_map, _ = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
                                                             face_vertices_image, face_vertices_camera[:, :, :, -1:]) 
-        depth_map = self.normalize_multiple_depth(depth_map)
+        depth_map = self.renderer.normalize_multiple_depth(depth_map)
 
         uv_features, face_idx = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
             face_vertices_image, uv_face_attr)
@@ -259,7 +261,7 @@ class TexturedMeshModel(nn.Module):
 
        
         return mask.permute(0, 3, 1, 2), depth_map.permute(0, 3, 1, 2), normals_image.permute(0, 3, 1, 2), \
-               face_normals.permute(0, 3, 1, 2), face_idx.permute(0, 3, 1, 2)
+               face_normals.permute(0, 2, 1), face_idx[:, None, :, :]
 
 
 
