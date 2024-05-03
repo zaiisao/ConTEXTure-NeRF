@@ -127,9 +127,10 @@ class TEXTure:
         #MJ: get the binary masks for each view which indicates how much the image rendered from each view
         #should contribute to the texture atlas over the mesh which is the cause of the image
         
-        #MJ use two versions and compare:
-        # self.weight_masks = self.get_weight_masks_for_views_vectorized( self.face_normals, self.face_idx )
+        #MJL three  versions and compare:
+        # self.weight_masks = self.get_weight_masks_for_views_vectorized_over_ij( self.face_normals, self.face_idx )
         self.weight_masks =  self.get_weight_masks_for_views_ij_loop(self, face_normals, face_idx )
+        # elf.weight_masks =  self.get_weight_masks_for_views_vectorized(self, face_normals, face_idx )
         
     def get_weight_masks_for_views_ij_loop(self, face_normals, face_idx ):
         
@@ -180,7 +181,7 @@ class TEXTure:
         return weight_masks
 
 
-    def get_weight_masks_for_views_vectorized(self, face_normals, face_idx ):
+    def get_weight_masks_for_views_vectorized_over_ij(self, face_normals, face_idx ):
     # Assuming face_idx and face_normals are defined as described:
     # face_idx: shape = (B, 1, H, W); 
     # face_normals: shape = (B, 3, num_faces); 
@@ -207,6 +208,28 @@ class TEXTure:
                     weight_masks[v1, 0] &= ~(same_face & lower_normal)  # Invert and update mask
 
         return weight_masks
+
+
+    def get_weight_masks_for_views_vectorized(self, face_normals, face_idx ):
+        # Assuming initialization as described...
+
+        num_views = face_idx.shape[0]
+        H, W = face_idx.shape[2], face_idx.shape[3]
+        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool)
+
+        # Expand face_idx and face_normals for all-to-all view comparisons
+        num_faces = face_normals.shape[2]
+        expanded_face_idx = face_idx.unsqueeze(0).expand(num_views, num_views, 1, H, W)
+        expanded_normals = face_normals[:, 2, :].unsqueeze(0).expand(num_views, num_views, num_faces).gather(2, expanded_face_idx.long())
+
+        # Compute masks
+        same_faces = expanded_face_idx == expanded_face_idx.transpose(0, 1)
+        lower_normals = expanded_normals < expanded_normals.transpose(0, 1)
+
+        # Apply masks to weight_masks
+        update_masks = same_faces & lower_normals
+        weight_masks &= ~update_masks.any(dim=1)
+
 
 
     def init_mesh_model(self) -> nn.Module:
