@@ -97,10 +97,7 @@ class TEXTure:
             self.phis.append(phi)
             self.radii.append(radius)
 
-        if self.augmentations:
-            augmented_vertices = self.mesh_model.augment_vertices()
-        else:
-            augmented_vertices = self.mesh_model.vertices
+        augmented_vertices = self.mesh_model.mesh.vertices
         
         background_type = 'none'
         use_render_back = False
@@ -108,16 +105,16 @@ class TEXTure:
         # JA: We need to repeat several tensors to support the batch size.
         # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
         # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
-        mask, depth_map, normals_image,face_normals,face_idx = self.render_face_normals_face_idx(
+        mask, depth_map, normals_image,face_normals,face_idx = self.mesh_model.render_face_normals_face_idx(
             augmented_vertices[None].repeat(batch_size, 1, 1),
-            self.mesh_model.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
+            self.mesh_model.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.mesh_model.face_attributes.repeat(batch_size, 1, 1, 1),
-            elev=self.thetas,
-            azim=self.phis,
-            radius= self.radii,
-            look_at_height=self.dy,
+            elev=torch.tensor(self.thetas).to(self.device),
+            azim=torch.tensor(self.phis).to(self.device),
+            radius=torch.tensor(self.radii).to(self.device),
+            look_at_height=self.mesh_model.dy,
          
-            dims=self.cfg.guide.train_grid_size, # MJ: 1200,
+            # dims=self.cfg.render.train_grid_size, # MJ: 1200,
             background_type=background_type
         )
         
@@ -137,7 +134,7 @@ class TEXTure:
         #For the veiwed region of the mesh under each view, find the overlapping with the neighbor regions under
         # different views. Two viewed regions of the mesh are overlapped if the face_idx of them are the same
         
-        weight_masks = torch.full( face_idx.shape, True) 
+        weight_masks = torch.full(face_idx.shape, True).to(self.device)
         #MJ: face_idx: shape = (B,1,H,W); 
         # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
         
@@ -147,11 +144,11 @@ class TEXTure:
         # when  face_idx[b,0,i,j] does not have the maximum z-normal among all the views. 
         
         num_of_views = face_idx.shape[0] #MJ: from 0 to 6
-        for v1 in range (  num_of_views  ):
-              for v2 in range (  num_of_views  ):
+        for v1 in range (num_of_views):
+              for v2 in range (num_of_views):
                   if v1 != v2: #Compare with only neighbor views:
                     #  If the z_normals of v1 is less than that of any other view, the weight mask of v1 is set to False
-                    weight_masks[v1] = not ( face_normals[v1,:, face_idx][2] < face_normals[v2,:, face_idx][2] )
+                    weight_masks[v1] = torch.logical_not(face_normals[v1,:, face_idx[v1]][2] < face_normals[v2,:, face_idx[v2]][2])
                     #  face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j)  
         
         return weight_masks
