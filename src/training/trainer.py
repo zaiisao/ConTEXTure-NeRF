@@ -78,6 +78,84 @@ class TEXTure:
         self.zero123_front_input = None
 
         logger.info(f'Successfully initialized {self.cfg.log.exp_name}')
+        
+         
+       #MJ: Create the mask for each view based on the value of the z-normals
+        
+       # Set the camera poses:
+        self.thetas = []
+        self.phis = []
+        self.radii = []
+       
+        for i, data in enumerate(self.dataloaders['train']):
+           
+            theta, phi, radius = data['theta'], data['phi'], data['radius']
+            phi = phi - np.deg2rad(self.cfg.render.front_offset)
+            phi = float(phi + 2 * np.pi if phi < 0 else phi)
+
+            self.thetas.append(theta)
+            self.phis.append(phi)
+            self.radii.append(radius)
+
+        if self.augmentations:
+            augmented_vertices = self.mesh_model.augment_vertices()
+        else:
+            augmented_vertices = self.mesh_model.vertices
+        
+        background_type = 'none'
+        use_render_back = False
+        batch_size = 7
+        # JA: We need to repeat several tensors to support the batch size.
+        # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
+        # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
+        mask, depth_map, normals_image,face_normals,face_idx = self.render_face_normals_face_idx(
+            augmented_vertices[None].repeat(batch_size, 1, 1),
+            self.mesh_model.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
+            self.mesh_model.face_attributes.repeat(batch_size, 1, 1, 1),
+            elev=self.thetas,
+            azim=self.phis,
+            radius= self.radii,
+            look_at_height=self.dy,
+         
+            dims=self.cfg.guide.train_grid_size, # MJ: 1200,
+            background_type=background_type
+        )
+        
+        self.mask = mask #MJ: object_mask of the mesh
+        self.depth_map = depth_map
+        self.normals_image = normals_image
+        self.face_normals = face_normals
+        self.face_idx = face_idx
+        
+        #MJ: get the binary masks for each view which indicates how much the image rendered from each view
+        #should contribute to the texture atlas over the mesh which is the cause of the image
+        
+        self.weight_masks = self.get_weight_masks_for_views( self.face_normals, self.face_idx )
+        
+    def get_weight_masks_for_views(self, face_normals, face_idx ):
+        
+        #For the veiwed region of the mesh under each view, find the overlapping with the neighbor regions under
+        # different views. Two viewed regions of the mesh are overlapped if the face_idx of them are the same
+        
+        weight_masks = torch.full( face_idx.shape, True) 
+        #MJ: face_idx: shape = (B,1,H,W); 
+        # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
+        
+        #face_normals: shape = (B, 3, num_faces); face_normals[:,:, k] refers to the face normal vectors of face idx = k
+        #MJ: weight_masks[b,0,i,j] indicates whether the face_idx[b,0,i,j] of  pixel (i,j) under view b should contribute to the texture atlas;
+        #initialized to True by torch.full( face_idx.shape, True): It will be set to False 
+        # when  face_idx[b,0,i,j] does not have the maximum z-normal among all the views. 
+        
+        num_of_views = face_idx.shape[0] #MJ: from 0 to 6
+        for v1 in range (  num_of_views  ):
+              for v2 in range (  num_of_views  ):
+                  if v1 != v2: #Compare with only neighbor views:
+                    #  If the z_normals of v1 is less than that of any other view, the weight mask of v1 is set to False
+                    weight_masks[v1] = not ( face_normals[v1,:, face_idx][2] < face_normals[v2,:, face_idx][2] )
+                    #  face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j)  
+        
+        return weight_masks
+        
 
     def init_mesh_model(self) -> nn.Module:
         # fovyangle = np.pi / 6 if self.cfg.guide.use_zero123plus else np.pi / 3
@@ -524,7 +602,8 @@ class TEXTure:
 
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
-            object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache
+            object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
+            weight_masks = self.weight_masks
         )
 
         self.mesh_model.change_default_to_median()
@@ -999,7 +1078,9 @@ class TEXTure:
         
     def project_back_only_texture_atlas(self, render_cache: Dict[str, Any], background: Any, rgb_output: torch.Tensor,
                      object_mask: torch.Tensor, update_mask: torch.Tensor, z_normals: torch.Tensor,
-                     z_normals_cache: torch.Tensor):
+                     z_normals_cache: torch.Tensor
+                     , weight_masks:torch.Tensor
+                     ):
         eroded_masks = []
         for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
             eroded_mask = cv2.erode(object_mask[i, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))
@@ -1052,8 +1133,9 @@ class TEXTure:
                 rgb_render = outputs['image']
 
                 # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
-
+                #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                #BY MJ:
+                loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
                 optimizer.step()
