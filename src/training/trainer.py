@@ -578,7 +578,7 @@ class TEXTure:
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
-            weight_masks = self.weight_masks
+            face_normals = self.face_normals, face_idx=self.face_idx
         )
 
         self.mesh_model.change_default_to_median()
@@ -1103,12 +1103,14 @@ class TEXTure:
             # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
             #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
             #BY MJ:
+            
             loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
             loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                             # the network, that is, the pixel value of the texture atlas
             optimizer.step()
 
         return rgb_render
+
 
     def log_train_image(self, tensor: torch.Tensor, name: str, colormap=False):
         if self.cfg.log.log_images:
