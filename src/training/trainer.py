@@ -155,32 +155,29 @@ class TEXTure:
             for v1 in range (num_of_views):
               for v2 in range (num_of_views):
                   if v1 != v2: #Ensure different views are compared
-                    #Check if
-                    # face_normals[v1,2, face_idx[v1,0,i,j]] >= face_normals[v2,2, face_idx[v2,0]],
-                    # where face_idx[v1,0,i,j] = face_idx[v2,0]  
-                    # When you write c1[i, j] == c2, you are performing an element-wise comparison between a single value from the tensor c1 at position [i, j])
-                    # and each element in the tensor c2 [broadcasting]
-                    
-                    # Get the face index for the current view and pixel
-                    # Extract the index and then unsqueeze to add the dimensions back
-                    face_index_v1_ij = face_idx[v1, 0, i, j].unsqueeze(0).unsqueeze(1)
-                    # MJ: Or, Use slicing to keep dimensions: face_index_v1_ij = face_idx[v1, 0, i:i+1, j:j+1]
-                    
-                    face_index_v2 = face_idx[v2, 0] #MJ: face_index_v2 : shape =(H,W)
+                                       
+                   
                     # Check if the face indices are the same and compare their z-normals
-                    if face_index_v1_ij == face_index_v2: #MJ: face_index_v1_ij: broadcast (1,1) to (H,W)
-                        z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
-                        z_normal_v2 = face_normals[v2, 2, face_index_v2]
-                                
-                    #MJ: matches will have the same shape of face_idx[v2,0] = (H,W)          
+                    #Find if the index at (i, j) in v1 matches anywhere in v2. That is,
                     # If the z-normal of pixel (i,j), with face_idx[v1,0,i,j]  in v1 is less than that of any pixel in any other viewpoint v2 
-                    # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, because some worthy pixel exists in other viewpoints
-                        if z_normal_v1_ij <  z_normal_v2:   #MJ: broadcasting is done?                        
-                           weight_masks[v1, 0, i, j] = False
-                           break #MJ: Exit the loop earlier because we have found a higher z-normal:
+                    # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, 
+                    # because some worthy pixel exists in other viewpoints.
+                    #face_idx[v1, 0, i:i+1, j:j+1] has shape =(1,1);   face_idx[v2, 0] has shape =(H,W)
+                   
+                    # Compare this index against all indices in view v2
+                    match_locations =  face_idx[v1, 0, i:i+1, j:j+1] == face_idx[v2, 0]
+                    # shape (1,1) and (H,W) are compatible with (1,1) is broadcasted to (H,W)
+                    # Use .any() to check if there's any True in the resulting tensor
+                    matches = match_locations.any()
+                    if matches: 
+                        faceId = face_idx[v1,0,i,j]
+                        if face_normals[ v1, 2, faceId] < face_normals[v2,2, faceId]:
+                            weight_masks[v1,  i, j] = False                       
+                            break #MJ: Exit the loop [  for v2 in range (num_of_views) ] earlier
+                            # because we have found a higher z-normal:
                             # if pixel (i,j) in v1 is not worthy to contribute in comparison with some other pixels in any view v2,
-                            # we do not need to compare (i,j) in v1 to pixels in any other viewpoints than v2; The existence
-                            # of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy:
+                            # we do not need to compare (i,j) in v1 to pixels in any viewpoints than other than v2;
+                            # The existence of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy.
     
 
         return weight_masks
