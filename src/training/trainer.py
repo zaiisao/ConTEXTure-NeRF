@@ -137,7 +137,7 @@ class TEXTure:
     def get_weight_masks_for_views_ij_loop(self, face_normals, face_idx ):
         
                
-        #MJ: face_idx: shape = (B,1,H,W); 
+        #MJ: face_idx: shape = (B,1,H,W); # (B,H,W) => (B,1, H, W) to have the standard shape (B,C,H,W)
         # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
         
         #face_normals: shape = (B, 3, num_faces); face_normals[v,:, k] refers to the face normal vectors of face idx = k under view v;
@@ -162,10 +162,13 @@ class TEXTure:
                     # and each element in the tensor c2 [broadcasting]
                     
                     # Get the face index for the current view and pixel
-                    face_index_v1_ij = face_idx[v1, 0, i, j]
-                    face_index_v2 = face_idx[v2, 0]
+                    # Extract the index and then unsqueeze to add the dimensions back
+                    face_index_v1_ij = face_idx[v1, 0, i, j].unsqueeze(0).unsqueeze(1)
+                    # MJ: Or, Use slicing to keep dimensions: face_index_v1_ij = face_idx[v1, 0, i:i+1, j:j+1]
+                    
+                    face_index_v2 = face_idx[v2, 0] #MJ: face_index_v2 : shape =(H,W)
                     # Check if the face indices are the same and compare their z-normals
-                    if face_index_v1_ij == face_index_v2: #MJ: broadcasting is done?
+                    if face_index_v1_ij == face_index_v2: #MJ: face_index_v1_ij: broadcast (1,1) to (H,W)
                         z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
                         z_normal_v2 = face_normals[v2, 2, face_index_v2]
                                 
