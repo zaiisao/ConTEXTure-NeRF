@@ -129,13 +129,15 @@ class TEXTure:
         
         #MJL three  versions and compare:
         # self.weight_masks = self.get_weight_masks_for_views_vectorized_over_ij( self.face_normals, self.face_idx )
-        self.weight_masks =  self.get_weight_masks_for_views_ij_loop(self, face_normals, face_idx )
+        #self.weight_masks =  self.get_weight_masks_for_views_ij_loop(self, face_normals, face_idx )
         # elf.weight_masks =  self.get_weight_masks_for_views_vectorized(self, face_normals, face_idx )
+        self.weight_masks = self.get_weight_masks_for_views_loop_maxview1(self, face_normals, face_idx )
+        self.weight_masks = self.get_weight_masks_for_views_loop_maxview2(self, face_normals, face_idx )
         
     def get_weight_masks_for_views_ij_loop(self, face_normals, face_idx ):
         
                
-        #MJ: face_idx: shape = (B,1,H,W); 
+        #MJ: face_idx: shape = (B,1,H,W); # (B,H,W) => (B,1, H, W) to have the standard shape (B,C,H,W)
         # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
         
         #face_normals: shape = (B, 3, num_faces); face_normals[v,:, k] refers to the face normal vectors of face idx = k under view v;
@@ -160,10 +162,13 @@ class TEXTure:
                     # and each element in the tensor c2 [broadcasting]
                     
                     # Get the face index for the current view and pixel
-                    face_index_v1_ij = face_idx[v1, 0, i, j]
-                    face_index_v2 = face_idx[v2, 0]
+                    # Extract the index and then unsqueeze to add the dimensions back
+                    face_index_v1_ij = face_idx[v1, 0, i, j].unsqueeze(0).unsqueeze(1)
+                    # MJ: Or, Use slicing to keep dimensions: face_index_v1_ij = face_idx[v1, 0, i:i+1, j:j+1]
+                    
+                    face_index_v2 = face_idx[v2, 0] #MJ: face_index_v2 : shape =(H,W)
                     # Check if the face indices are the same and compare their z-normals
-                    if face_index_v1_ij == face_index_v2: #MJ: broadcasting is done?
+                    if face_index_v1_ij == face_index_v2: #MJ: face_index_v1_ij: broadcast (1,1) to (H,W)
                         z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
                         z_normal_v2 = face_normals[v2, 2, face_index_v2]
                                 
@@ -180,6 +185,89 @@ class TEXTure:
 
         return weight_masks
 
+    def get_weight_masks_for_views_loop_maxview1(self, face_normals, face_idx ):
+        
+               
+        #MJ: face_idx: shape = (B,1,H,W); 
+        # face_idx[:,0,:,:] refers to the face_idx from which the pixel (i,j) was projected
+        
+        #face_normals: shape = (B, 3, num_faces); face_normals[v,:, k] refers to the face normal vectors of face idx = k under view v;
+                                   
+        #face_normals[v1,:, face_idx]  refers to the face_normals of face_idx[v1,0,i,j] for every (i,j) 
+        #MJ: weight_masks[b,0,i,j] indicates whether the face_idx[b,0,i,j] of  pixel (i,j) under view b should contribute to the texture atlas;
+        #initialized to True by torch.full( face_idx.shape, True):  
+        
+        num_of_views = face_idx.shape[0] #MJ: The total num of views: from 0 to 6
+        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool)  # face_idx.shape:  (B,1, H, W)
+
+       # Iterate over each pixel in the HxW grid
+        # for i in range ( face_idx.shape[2] ):
+        #   for j in range (face_idx.shape[3]):
+        # Iterate over each view
+        for v1 in range (num_of_views):
+                
+            #   for v2 in range (num_of_views):
+            #       if v1 != v2: #Ensure different views are compared
+            #         #Check if
+            #         # face_normals[v1,2, face_idx[v1,0,i,j]] >= face_normals[v2,2, face_idx[v2,0]],
+            #         # where face_idx[v1,0,i,j] = face_idx[v2,0]  
+            #         # When you write c1[i, j] == c2, you are performing an element-wise comparison between a single value from the tensor c1 at position [i, j])
+            #         # and each element in the tensor c2 [broadcasting]
+                    
+            #         # Get the face index for the current view and pixel
+            #         face_index_v1_ij = face_idx[v1, 0, i, j]
+            #         face_index_v2 = face_idx[v2, 0]
+            #         # Check if the face indices are the same and compare their z-normals
+            #         if face_index_v1_ij == face_index_v2: #MJ: broadcasting is done?
+            #             z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
+            #             z_normal_v2 = face_normals[v2, 2, face_index_v2]
+                                
+            #         #MJ: matches will have the same shape of face_idx[v2,0] = (H,W)          
+            #         # If the z-normal of pixel (i,j), with face_idx[v1,0,i,j]  in v1 is less than that of any pixel in any other viewpoint v2 
+            #         # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, because some worthy pixel exists in other viewpoints
+            #             if z_normal_v1_ij <  z_normal_v2:   #MJ: broadcasting is done?                        
+            #                weight_masks[v1, 0, i, j] = False
+            #                break #MJ: Exit the loop earlier because we have found a higher z-normal:
+            #                 # if pixel (i,j) in v1 is not worthy to contribute in comparison with some other pixels in any view v2,
+            #                 # we do not need to compare (i,j) in v1 to pixels in any other viewpoints than v2; The existence
+            #                 # of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy:
+    
+            face_index_v1 = face_idx[v1, 0]  # Indices for the current view: face_idx[v1, 0] =(H,W)
+            face_index_allviews = face_idx[:, 0] #(7,H,W) => index to face:  # Z-normals for the current view
+            z_normal_v1 = face_normals[v1, 2, face_index_v1]
+            
+            #MJ:[v1, 2, ...] from face_normals to get the z-component for all faces across all 7 views. 
+            # The resulting shape after this partial indexing is (num_faces, H,W).
+            
+            # [:, 0] from face_idx reduces the face_idx tensor from (7, 1, H, W) to (7, H, W)
+            # Prepare to compare with all other views
+            max_normals = torch.zeros_like(z_normal_v1)
+            
+            for v2 in range(num_of_views):
+                if v1 != v2:
+                    z_normal_v2 = face_normals[v2, 2, face_idx[v2, 0]]  # Z-normals for view v2: shape =(1,H,W)
+                    # Compare face indices and update max normals
+                    same_faces = face_idx[v1, 0] == face_idx[v2, 0] #shape = (1, H, W)
+                    max_normals = torch.where(same_faces, torch.max(z_normal_v1, z_normal_v2), max_normals) #If same_face => torch.max(z_normal_v1, z_normal_v2) 
+                    #torch.where(condition, input, other, *, out=None) → Tensor:
+                    
+
+        # Update mask based on maximum normal comparison
+        weight_masks[v1, 0] = z_normal_v1 >= max_normals
+
+        return weight_masks
+
+
+#             z_normal_allviews = face_normals[:, 2, face_idx[:, 0] ]
+#             #You are now indexing (7, num_faces) with (7, H, W). PyTorch performs this operation by using each element in the face_idx[:, 0] tensor as an index into face_normals[:, 2, ...].
+            
+        
+#             max_z_normals = torch.max( face_normals[:, 2, face_idx[:, 0] ],  dim=0)
+#             if z_normal_v1 <  max_z_normals:   #MJ: broadcasting is done                        
+#                 weight_masks[v1, 0] = False
+                            
+#         return weight_masks
+# s
 
     def get_weight_masks_for_views_vectorized_over_ij(self, face_normals, face_idx ):
     # Assuming face_idx and face_normals are defined as described:
