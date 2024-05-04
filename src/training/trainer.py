@@ -129,10 +129,10 @@ class TEXTure:
         
         #MJL three  versions and compare:
         # self.weight_masks = self.get_weight_masks_for_views_vectorized_over_ij( self.face_normals, self.face_idx )
-        #self.weight_masks =  self.get_weight_masks_for_views_ij_loop(self, face_normals, face_idx )
-        # elf.weight_masks =  self.get_weight_masks_for_views_vectorized(self, face_normals, face_idx )
-        self.weight_masks = self.get_weight_masks_for_views_loop_maxview1(self, face_normals, face_idx )
-        self.weight_masks = self.get_weight_masks_for_views_loop_maxview2(self, face_normals, face_idx )
+        # self.weight_masks = self.get_weight_masks_for_views_ij_loop(face_normals, face_idx)
+        self.weight_masks =  self.get_weight_masks_for_views_vectorized(face_normals, face_idx )
+        # self.weight_masks = self.get_weight_masks_for_views_loop_maxview1(face_normals, face_idx)
+        # self.weight_masks = self.get_weight_masks_for_views_loop_maxview2(face_normals, face_idx)
         
     def get_weight_masks_for_views_ij_loop(self, face_normals, face_idx ):
         
@@ -147,40 +147,42 @@ class TEXTure:
         #initialized to True by torch.full( face_idx.shape, True):  
         
         num_of_views = face_idx.shape[0] #MJ: The total num of views: from 0 to 6
-        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool)  # face_idx.shape:  (B,1, H, W)
+        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool).to(self.device)  # face_idx.shape:  (B,1, H, W)
 
        # Iterate over each pixel in the HxW grid
-        for i in range ( face_idx.shape[2] ):
-          for j in range (face_idx.shape[3]):
-            for v1 in range (num_of_views):
-              for v2 in range (num_of_views):
-                  if v1 != v2: #Ensure different views are compared
-                    #Check if
-                    # face_normals[v1,2, face_idx[v1,0,i,j]] >= face_normals[v2,2, face_idx[v2,0]],
-                    # where face_idx[v1,0,i,j] = face_idx[v2,0]  
-                    # When you write c1[i, j] == c2, you are performing an element-wise comparison between a single value from the tensor c1 at position [i, j])
-                    # and each element in the tensor c2 [broadcasting]
-                    
-                    # Get the face index for the current view and pixel
-                    # Extract the index and then unsqueeze to add the dimensions back
-                    face_index_v1_ij = face_idx[v1, 0, i, j].unsqueeze(0).unsqueeze(1)
-                    # MJ: Or, Use slicing to keep dimensions: face_index_v1_ij = face_idx[v1, 0, i:i+1, j:j+1]
-                    
-                    face_index_v2 = face_idx[v2, 0] #MJ: face_index_v2 : shape =(H,W)
-                    # Check if the face indices are the same and compare their z-normals
-                    if face_index_v1_ij == face_index_v2: #MJ: face_index_v1_ij: broadcast (1,1) to (H,W)
-                        z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
-                        z_normal_v2 = face_normals[v2, 2, face_index_v2]
-                                
-                    #MJ: matches will have the same shape of face_idx[v2,0] = (H,W)          
-                    # If the z-normal of pixel (i,j), with face_idx[v1,0,i,j]  in v1 is less than that of any pixel in any other viewpoint v2 
-                    # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, because some worthy pixel exists in other viewpoints
-                        if z_normal_v1_ij <  z_normal_v2:   #MJ: broadcasting is done?                        
-                           weight_masks[v1, 0, i, j] = False
-                           break #MJ: Exit the loop earlier because we have found a higher z-normal:
-                            # if pixel (i,j) in v1 is not worthy to contribute in comparison with some other pixels in any view v2,
-                            # we do not need to compare (i,j) in v1 to pixels in any other viewpoints than v2; The existence
-                            # of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy:
+        for i in range (face_idx.shape[2]):
+            print(i)
+            for j in range (face_idx.shape[3]):
+                for v1 in range (num_of_views):
+                    for v2 in range (num_of_views):
+                        if v1 != v2: #Ensure different views are compared
+                            #Check if
+                            # face_normals[v1,2, face_idx[v1,0,i,j]] >= face_normals[v2,2, face_idx[v2,0]],
+                            # where face_idx[v1,0,i,j] = face_idx[v2,0]  
+                            # When you write c1[i, j] == c2, you are performing an element-wise comparison between a single value from the tensor c1 at position [i, j])
+                            # and each element in the tensor c2 [broadcasting]
+                            
+                            # Get the face index for the current view and pixel
+                            # Extract the index and then unsqueeze to add the dimensions back
+                            face_index_v1_ij = face_idx[v1, 0, i, j].unsqueeze(0).unsqueeze(1)
+                            # MJ: Or, Use slicing to keep dimensions: face_index_v1_ij = face_idx[v1, 0, i:i+1, j:j+1]
+                            
+                            face_index_v2 = face_idx[v2, 0] #MJ: face_index_v2 : shape =(H,W)
+                            # Check if the face indices are the same and compare their z-normals
+
+                            if (face_idx[v1, 0, i, j] == face_idx[v2, 0]).any():
+                                z_normal_v1_ij = face_normals[v1, 2, face_index_v1_ij]
+                                z_normal_v2 = face_normals[v2, 2, face_index_v2]
+                                        
+                            #MJ: matches will have the same shape of face_idx[v2,0] = (H,W)          
+                            # If the z-normal of pixel (i,j), with face_idx[v1,0,i,j]  in v1 is less than that of any pixel in any other viewpoint v2 
+                            # with the same face_idx, then the pixel (i,j) under v1 is not worthy to contribute to the texture atlas, because some worthy pixel exists in other viewpoints
+                                if (torch.ones_like(z_normal_v2) * z_normal_v1_ij[0, 0] < z_normal_v2).any():   #MJ: broadcasting is done?                        
+                                    weight_masks[v1, 0, i, j] = False
+                                    break #MJ: Exit the loop earlier because we have found a higher z-normal:
+                                        # if pixel (i,j) in v1 is not worthy to contribute in comparison with some other pixels in any view v2,
+                                        # we do not need to compare (i,j) in v1 to pixels in any other viewpoints than v2; The existence
+                                        # of such pixel in one viewpoint v2 is sufficient to make the pixel (i,j) in v1 unworthy:
     
 
         return weight_masks
@@ -198,7 +200,7 @@ class TEXTure:
         #initialized to True by torch.full( face_idx.shape, True):  
         
         num_of_views = face_idx.shape[0] #MJ: The total num of views: from 0 to 6
-        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool)  # face_idx.shape:  (B,1, H, W)
+        weight_masks = torch.full(face_idx.shape, True, dtype=torch.bool).to(self.device)  # face_idx.shape:  (B,1, H, W)
 
        # Iterate over each pixel in the HxW grid
         # for i in range ( face_idx.shape[2] ):
@@ -276,7 +278,7 @@ class TEXTure:
 
         num_views = face_idx.shape[0]
         H, W = face_idx.shape[2], face_idx.shape[3]
-        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool)
+        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool).to(self.device)
 
         # Iterate over each pair of views
         for v1 in range(num_views):
@@ -298,7 +300,7 @@ class TEXTure:
         return weight_masks
 
 
-    def get_weight_masks_for_views_vectorized(self, face_normals, face_idx ):
+    def get_weight_masks_for_views_vectorized(self, face_normals, face_idx):
         # Assuming initialization as described...
 
         num_views = face_idx.shape[0]
@@ -766,7 +768,9 @@ class TEXTure:
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
-            face_normals = self.face_normals, face_idx=self.face_idx
+            # face_normals = self.face_normals, face_idx=self.face_idx
+            # face_idx=self.face_idx
+            weight_masks=self.weight_masks
         )
 
         self.mesh_model.change_default_to_median()

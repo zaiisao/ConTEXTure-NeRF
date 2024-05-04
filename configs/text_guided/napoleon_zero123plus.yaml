@@ -1,5 +1,5 @@
 log:
-  exp_name: napoleon_0123plus_z_normal_blend_nopad
+  exp_name: napoleon_0123plus_get_weight_masks_for_views_vectorized
 guide:
   text: "A photo of Napoleon Bonaparte, {} view"
   append_direction: True
