@@ -194,7 +194,7 @@ class TEXTure:
         # if the z-component of the normal vector at the face_id of the pixel  is less than that of any other view. 
         
           
-        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool) 
+        weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool).to(self.device)
         # Create mask with True as default; It means that  all pixels in each view are worthy to contribute to the
         # texture altas; Later, each pixel in each view v is considered unworthy to contribute to the texture atlas, that is,
         #  weight_masks[v, 0, i,j] = False, if the z-component of the normal vector at the face_id of the pixel 
@@ -1353,7 +1353,7 @@ class TEXTure:
         if z_normals is not None and z_normals_cache is not None:
             z_normals_cache[:, 0, :, :] = torch.max(z_normals_cache[:, 0, :, :], z_normals[:, 0, :, :])
 
-        optimizer = torch.optim.Adam(self.mesh_model.get_params(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
             
         # JA: Create the texture atlas for the mesh using each view. It updates the parameters
