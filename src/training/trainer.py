@@ -916,14 +916,23 @@ class TEXTure:
         z_normals_cache = meta_output['image'].clamp(0, 1)
         object_mask = outputs['mask'] # JA: mask has a shape of 1200x1200
 
-        self.project_back_only_texture_atlas(
+        #MJ: Testing self.project_back_only_texture_atlas_max_z_normals:
+        # self.project_back_only_texture_atlas(
+        #     render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
+        #     object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
+        #     # face_normals = self.face_normals, face_idx=self.face_idx
+        #     # face_idx=self.face_idx
+        #     weight_masks=self.weight_masks
+        # )
+        
+        self.project_back_only_texture_atlas_max_z_normals(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
-            # face_normals = self.face_normals, face_idx=self.face_idx
-            # face_idx=self.face_idx
+            face_normals = self.face_normals, face_idx=self.face_idx,
             weight_masks=self.weight_masks
         )
 
+        
         self.mesh_model.change_default_to_median()
         logger.info('Finished Painting ^_^')
         logger.info('Saving the last result...')
@@ -1541,7 +1550,7 @@ class TEXTure:
                     #loss += (masked_current_z_normals - masked_last_z_normals.detach()).pow(2).mean()
                     
 
-                    # Without batch_indices
+                    # Without batch_indices:  Let us see what happens (just for test)
                     try:
                         gathered_normals_without_batch = face_normals[:, 2, face_idx[:, 0, :,:]]
                     except Exception as e:
@@ -1551,6 +1560,7 @@ class TEXTure:
                     max_z_normals, _ = torch.max( gathered_z_normals, dim=0)
                     
                     loss += (masked_current_z_normals -  max_z_normals.detatch()).pow(2).mean()
+                #ENd if z_normals is not None
                     
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
