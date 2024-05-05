@@ -20,4 +20,5 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == '__main__':
+    
     main()

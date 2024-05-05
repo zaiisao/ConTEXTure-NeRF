@@ -245,7 +245,7 @@ class TexturedMeshModel(nn.Module):
             face_vertices_image, uv_face_attr)
         uv_features = uv_features.detach()
     
-        mask = (face_idx > -1).float()[..., None]
+        mask = (face_idx > -1).float()[..., None] #MJ: face_idx: (7,1200,1200); mask: (7,1200,1200,1) => (7,1,1200,1200) by  mask.permute(0, 3, 1, 2
 
         # JA: face_normals[0].shape:[14232, 3], face_idx.shape: [1, 1024, 1024]
         # normals_image = face_normals[0][face_idx, :] # JA: normals_image: [1024, 1024, 3]
@@ -262,7 +262,6 @@ class TexturedMeshModel(nn.Module):
        
         return mask.permute(0, 3, 1, 2), depth_map.permute(0, 3, 1, 2), normals_image.permute(0, 3, 1, 2), \
                face_normals.permute(0, 2, 1), face_idx[:, None, :, :]
-
 
 
     @property
@@ -413,9 +412,14 @@ class TexturedMeshModel(nn.Module):
     def forward(self, x):
         raise NotImplementedError
 
-    def get_params(self):
+    def get_params_texture_atlas(self):
         # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
         return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
+                                                            # are not used as parameters of the loss function
+
+    def get_params_texture_atlas_max_z_normal(self):
+         return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
+        # return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function
 
     @torch.no_grad()
