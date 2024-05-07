@@ -119,12 +119,26 @@ class TEXTure:
 
         #MJ: get the binary masks for each view which indicates how much the image rendered from each view
         # should contribute to the texture atlas over the mesh which is the cause of the image
-        face_view_map = self.create_face_view_map(face_idx)
+        # face_view_map = self.create_face_view_map(face_idx)
 
-        logger.info(f'Creating weight masks for each view')
-        weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
+        # logger.info(f'Creating weight masks for each view')
+        # weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
 
-        self.weight_masks = weight_masks
+        # self.weight_masks = weight_masks
+
+        # JA: It computes the self.meta_texture_img which contains the best z normals of the pixel
+        # images
+        self.project_back_max_z_normals(
+            background=None, object_mask=self.mask, z_normals=self.normals_image[:,2:3,:,:],
+            face_normals=self.face_normals, face_idx=self.face_idx           
+        )
+
+        meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
+                                            use_meta_texture=True, render_cache=None)
+        self.current_z_normals = meta_outputs['image']
+        self.current_z_mask = meta_outputs['mask'].flatten()
+
+
 
         logger.info(f'Successfully initialized {self.cfg.log.exp_name}')
 
@@ -1213,6 +1227,7 @@ class TEXTure:
                 #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 #BY MJ:
                 loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                # loss = (render_update_mask * self.meta_texture_img * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
                 optimizer.step()
@@ -1290,15 +1305,15 @@ class TEXTure:
                
                
                 gathered_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
-                max_z_normals, _ = torch.max( gathered_z_normals, dim=0)
+                # max_z_normals, _ = torch.max( gathered_z_normals, dim=0)
 
-                loss = (masked_current_z_normals -  max_z_normals.detatch()).pow(2).mean()
+                loss = (masked_current_z_normals -  gathered_z_normals.detatch()).pow(2).mean()
 
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
                                 
                                 
-                optimizer.step()
+                optimizer.step() # JA: It learns self.meta_texture_img
 
                 pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
 
