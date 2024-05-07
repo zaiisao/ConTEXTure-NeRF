@@ -137,7 +137,7 @@ class TEXTure:
         face_view_map = self.create_face_view_map( face_idx)
         self.weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
         
-            
+            # z_normals[0, 2, i, j] z_normals[1, 2, i, j] 
     #MJ: we will create a dict face_map which has the following:
     # {
     #     face_id_1: {
@@ -151,6 +151,8 @@ class TEXTure:
     # } 
     # (1) For each face_id, list one or more views, view_1, view_2,..., under which the face is projected on the view image;
     # (2) One face is projected onto a set of neighboring pixels (i,j)
+
+
 
     def create_face_view_map(self, face_idx):
         # Initialize a nested dictionary to hold face IDs with sub-dictionaries for views

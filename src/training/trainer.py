@@ -132,50 +132,100 @@ class TEXTure:
         num_views, _, H, W = face_idx.shape  # Assume face_idx shape is (B, 1, H, W)
 
         # Flatten the face_idx tensor to make it easier to work with
-        faces = face_idx.view(num_views, -1)  # Shape becomes (num_views, H*W)
+        face_idx_flattened_2d = face_idx.view(num_views, -1)  # Shape becomes (num_views, H*W)
 
         # Get the indices of all elements
-        view_indices, pixel_indices = torch.meshgrid(
+        # JA: From ChatGPT:
+        # torch.meshgrid is used to create a grid of indices that corresponds to each dimension of the input tensor,
+        # specifically in this context for the view indices and pixel indices. It allows us to pair each view index
+        # with every pixel index, thereby creating a full coordinate system that can be mapped directly to the values
+        # in the tensor face_idx.
+        view_by_pixel_indices, pixel_by_view_indices = torch.meshgrid(
             torch.arange(num_views, device=face_idx.device),
             torch.arange(H * W, device=face_idx.device),
             indexing='ij'
         )
 
         # Flatten indices tensors
-        view_indices = view_indices.flatten()
-        pixel_indices = pixel_indices.flatten()
+        view_by_pixel_indices_flattened = view_by_pixel_indices.flatten()
+        pixel_by_view_indices_flattened = pixel_by_view_indices.flatten()
+
+        faces_idx_view_pixel_flattened = face_idx_flattened_2d.flatten()
 
         # Convert pixel indices back to 2D indices (i, j)
-        i_indices = pixel_indices // W
-        j_indices = pixel_indices % W
+        pixel_i_indices = pixel_by_view_indices_flattened // W
+        pixel_j_indices = pixel_by_view_indices_flattened % W
 
-        combined = torch.stack([faces.flatten(), view_indices, i_indices, j_indices], dim=1)
+        # JA: The original face view map is made of nested dictionaries, which is very inefficient. Face map information
+        # is implemented as a single tensor which is efficient. Only tensors can be processed in GPU; dictionaries cannot
+        # be processed in GPU.
+        # The combined tensor represents, for each pixel (i, j), its view_idx 
+        combined_tensor_for_face_view_map = torch.stack([
+            faces_idx_view_pixel_flattened,
+            view_by_pixel_indices_flattened,
+            pixel_i_indices,
+            pixel_j_indices
+        ], dim=1)
 
         # Filter valid faces
-        valid_mask = faces.flatten() >= 0
-        return combined[valid_mask]  # This returns a tensor of shape [N, 4] where N is the number of valid entries
+        faces_idx_valid_mask = faces_idx_view_pixel_flattened >= 0
+
+        # JA:
+        # [[face_id_1, view_1, i_1, j_1]
+        #  [face_id_1, view_1, i_2, j_2]
+        #  [face_id_1, view_1, i_3, j_3]
+        #  [face_id_1, view_2, i_4, j_4]
+        #  [face_id_1, view_2, i_5, j_5]
+        #  ...
+        #  [face_id_2, view_1, i_k, j_l]
+        #  [face_id_2, view_1, i_{k + 1}, j_{l + 1}]
+        #  [face_id_2, view_2, i_{k + 2}, j_{l + 2}]]
+        #  ...
+        # The above example shows face_id_1 is projected, under view_1, to three pixels (i_1, j_1), (i_2, j_2), (i_3, j_3)
+        # Shape is Nx4 where N is the number of pixels (no greater than H*W*num_views = 1200*1200*7) that projects the
+        # valid face ID.
+        return combined_tensor_for_face_view_map[faces_idx_valid_mask]
 
     def compare_face_normals_between_views(self,face_view_map, face_normals, face_idx):
         num_views, _, H, W = face_idx.shape
         weight_masks = torch.full((num_views, 1, H, W), True, dtype=torch.bool, device=face_idx.device)
 
-        face_ids = face_view_map[:, 0]
+        face_ids = face_view_map[:, 0] # JA: face_view_map.shape = (H*W*num_views, 4) = (1200*1200*7, 4) = (10080000, 4)
         views = face_view_map[:, 1]
         i_coords = face_view_map[:, 2]
         j_coords = face_view_map[:, 3]
-        z_normals = face_normals[views, 2, face_ids]
+        z_normals = face_normals[views, 2, face_ids] # JA: The shape of face_normals is (num_views, 3, num_faces)
+                                                     # For example, face_normals can be (7, 3, 14232)
+                                                     # z_normals is (N,)
 
         # Scatter z-normals into the tensor, ensuring each index only keeps the max value
-        z_normals_gathered, _ = scatter_max(z_normals, face_ids, 0)
+        # JA: z_normals is the source/input tensor, and face_ids is the index tensor to scatter_max function.
+        max_z_normals_over_views, _ = scatter_max(z_normals, face_ids, dim=0) # JA: N is a subset of length H*W*num_views
+        # The shape of max_z_normals_over_N is the (num_faces,). The shape of the scatter_max output is equal to the
+        # shape of the number of distinct indices in the index tensor face_ids.
 
         # Map the gathered max normals back to the respective face ID indices
-        max_normals_per_face = z_normals_gathered[face_ids]
+        # JA: max_z_normals_over_views represents the max z normals over views for every face ID.
+        # The shape of face_ids is (N,). Therefore the shape of max_z_normals_over_views_per_face is also (N,).
+        max_z_normals_over_views_per_face = max_z_normals_over_views[face_ids]
 
         # Calculate the unworthy mask where current z-normals are less than the max per face ID
-        unworthy_mask = z_normals < max_normals_per_face
+        unworthy_pixels_mask = z_normals < max_z_normals_over_views_per_face
 
-        # Update the weight masks
-        weight_masks[views, 0, i_coords, j_coords] = ~(unworthy_mask)
+        # JA: Update the weight masks. The shapes of face_view_map, whence views, i_coords, and j_coords were extracted
+        # from, all have the shape of (N,), which represents the number of valid pixel entries. Therefore,
+        # weight_masks[views, 0, i_coords, j_coords] will also have the shape of (N,) which allows the values in
+        # weight_masks to be set in an elementwise manner.
+        #
+        # weight_masks[views[0], 0, i_coords[0], j_coords[0]] = ~(unworthy_pixels_mask[0])
+        # The above variable represents whether the pixel (i_coords[0], j_coords[0]) under views[0] is worthy to
+        # contribute to the texture atlas.
+        weight_masks[views, 0, i_coords, j_coords] = ~(unworthy_pixels_mask)
+
+        # weight_masks[views[0], 0, i_coords[0], j_coords[0]] = ~(unworthy_pixels_mask[0])
+        # weight_masks[views[1], 0, i_coords[1], j_coords[1]] = ~(unworthy_pixels_mask[1])
+        # weight_masks[views[2], 0, i_coords[2], j_coords[2]] = ~(unworthy_pixels_mask[2])
+        # weight_masks[views[3], 0, i_coords[3], j_coords[2]] = ~(unworthy_pixels_mask[3])
 
         return weight_masks
 
@@ -625,7 +675,7 @@ class TEXTure:
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
-            # face_normals = self.face_normals, face_idx=self.face_idx
+            # face_normals = self.face_normals, face_idx=self.face_idx,
             # face_idx=self.face_idx
             weight_masks=self.weight_masks
         )
@@ -1256,7 +1306,7 @@ class TEXTure:
                     gathered_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
                     max_z_normals, _ = torch.max( gathered_z_normals, dim=0)
                     
-                    loss += (masked_current_z_normals -  max_z_normals.detatch()).pow(2).mean()
+                    loss += (masked_current_z_normals -  max_z_normals.detach()).pow(2).mean()
                     
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
