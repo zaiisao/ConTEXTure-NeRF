@@ -411,14 +411,21 @@ class TexturedMeshModel(nn.Module):
 
     def forward(self, x):
         raise NotImplementedError
+    
+    def get_params(self):
+        # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
+         return [self.texture_img, self.meta_texture_img]
+          # JA: In our experiment, self.background_sphere_colors
+          # are not used as parameters of the loss function
+
 
     def get_params_texture_atlas(self):
         # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
         return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function
 
-    def get_params_texture_atlas_max_z_normal(self):
-         return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
+    def get_params_max_z_normal(self):
+         return [self.meta_texture_img]
         # return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function
 
