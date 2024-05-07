@@ -133,10 +133,7 @@ class TEXTure:
             face_normals=self.face_normals, face_idx=self.face_idx           
         )
 
-        meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
-                                            use_meta_texture=True, render_cache=None)
-        self.current_z_normals = meta_outputs['image']
-        self.current_z_mask = meta_outputs['mask'].flatten()
+       
 
 
 
