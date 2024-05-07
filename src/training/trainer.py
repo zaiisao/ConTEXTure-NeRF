@@ -1283,10 +1283,14 @@ class TEXTure:
 
         batch_size,_, H,W  = face_idx.shape  # Number of views
         batch_indices = torch.arange(batch_size).view(-1, 1, 1).expand(-1, H, W)
+        
+        gt_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
+        
         # This generates a tensor with the shape (batch_size, H, W) containing the appropriate batch indices, 
         # ensuring each pixel is indexed with its corresponding batch.
         # JA: TODO: Add num_epochs hyperparameter
         render_cache = None
+        
         with tqdm(range(200), desc='fitting mesh colors') as pbar:
             for i in pbar:
                 optimizer.zero_grad()
@@ -1296,19 +1300,19 @@ class TEXTure:
                                                     use_meta_texture=True, render_cache=render_cache)
                 current_z_normals = meta_outputs['image']
                 render_cache =  meta_outputs['render_cache']
-                current_z_mask = meta_outputs['mask'].flatten()
-                masked_current_z_normals = current_z_normals.reshape(1, current_z_normals.shape[1], -1)[:, :,
-                                        current_z_mask == 1][:, :1]
+                #current_z_mask = meta_outputs['mask'].flatten()
+                current_z_mask = meta_outputs['mask']
+                # masked_current_z_normals = current_z_normals.reshape(1, current_z_normals.shape[1], -1)[:, :,
+                #                         current_z_mask == 1][:, :1]
                 # masked_last_z_normals = z_normals_cache.reshape(1, z_normals_cache.shape[1], -1)[:, :,
                 #                         current_z_mask == 1][:, :1]
                 #MJ: compute the max_z_normals[face_idx[i,j]]
                 #loss += (masked_current_z_normals - masked_last_z_normals.detach()).pow(2).mean()
-               
-               
-                gathered_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
-                # max_z_normals, _ = torch.max( gathered_z_normals, dim=0)
-
-                loss = (masked_current_z_normals -  gathered_z_normals.detatch()).pow(2).mean()
+                              
+                # gt_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
+                #MJ: We want to make current_z_normals for each view to match gt_z_normals for each view; The greater
+                # the gt_z_normals for each is, the more current_z_normals should approach gt_z_normals
+                loss =  gt_z_normals * current_z_mask * (current_z_normals -  gt_z_normals.detatch()).pow(2).mean()
 
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
