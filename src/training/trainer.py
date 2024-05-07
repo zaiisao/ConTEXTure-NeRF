@@ -689,11 +689,7 @@ class TEXTure:
         #MJ: Testing self.project_back_only_texture_atlas_max_z_normals:
         self.project_back_only_texture_atlas(
             render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
-            object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache
-            #face_normals, face_ids
             object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
-            # face_normals = self.face_normals, face_idx=self.face_idx,
-            # face_idx=self.face_idx
             weight_masks=self.weight_masks
         )
         
