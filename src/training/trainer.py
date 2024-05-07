@@ -1193,17 +1193,23 @@ class TEXTure:
             blurred_render_update_mask[blurred_render_update_mask < 0.5] = 0
 
         render_update_mask = blurred_render_update_mask
+        
+
+        #MJ: Render using the learned self.meta_texture_img (which was learned in the init of TexturedMesh)
+        meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
+                                                    use_meta_texture=True, render_cache=None)
+        best_z_normals = meta_outputs['image']
+        
         for i in range(rgb_output.shape[0]):
             self.log_train_image(rgb_output[i][None] * render_update_mask[i][None], f'project_back_input_{i}')
             self.log_train_image(
                 torch.cat((z_normals[i][None], z_normals[i][None], z_normals[i][None]), dim=1),
                 f'project_back_z_normals_{i}'
             )
-
-        #MJ: Render using the learned self.meta_texture_img (which was learned in the init of TexturedMesh)
-        meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
-                                                    use_meta_texture=True, render_cache=None)
-        best_z_normals = meta_outputs['image']
+            self.log_train_image(
+                torch.cat((best_z_normals[i][None], best_z_normals[i][None], best_z_normals[i][None]), dim=1),
+                f'best_z_normals_{i}'
+            )
         
         optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
@@ -1322,8 +1328,9 @@ class TEXTure:
                 optimizer.step() # JA: It learns self.meta_texture_img
 
                 pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
-
-   
+        #End with tqdm(range(200), desc='fitting mesh colors') as pbar
+     
+            
     def compute_view_wights(self, gt_z_normals):
         a = 5
         #MJ: try a =7 
