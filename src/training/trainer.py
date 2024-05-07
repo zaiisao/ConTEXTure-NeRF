@@ -1312,7 +1312,8 @@ class TEXTure:
                 # gt_z_normals = face_normals[batch_indices, 2, face_idx[:, 0, :,:]]
                 #MJ: We want to make current_z_normals for each view to match gt_z_normals for each view; The greater
                 # the gt_z_normals for each is, the more current_z_normals should approach gt_z_normals
-                loss =  gt_z_normals * current_z_mask * (current_z_normals -  gt_z_normals.detatch()).pow(2).mean()
+                view_weights = self.compute_view_weights( gt_z_normals )
+                loss =  view_weights * current_z_mask * (current_z_normals -  gt_z_normals.detatch()).pow(2).mean()
 
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
@@ -1323,7 +1324,13 @@ class TEXTure:
                 pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
 
    
-
+    def compute_view_wights(self, gt_z_normals):
+        a = 5
+        #MJ: try a =7 
+        #     a = 9
+        view_weights = gt_z_normals.pow(2) * torch.exp( a* gt_z_normals) #MJ: view_weights =0 when gt_z_normals =0; increases exponentially as gt_z_normals approach 1
+        return view_weights
+    
     def log_train_image(self, tensor: torch.Tensor, name: str, colormap=False):
         if self.cfg.log.log_images:
             if colormap:
