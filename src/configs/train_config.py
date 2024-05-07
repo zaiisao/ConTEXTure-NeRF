@@ -52,7 +52,7 @@ class GuideConfig:
     guidance_scale_i: Optional[int] = None
     guidance_scale_t: Optional[int] = None
 
-    use_zero123plus: Optional[bool] = False
+    use_zero123plus: Optional[bool] = True
 
     guess_mode: Optional[bool] = False
     # Scale of mesh in 1x1x1 cube
