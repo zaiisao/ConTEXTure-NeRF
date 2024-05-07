@@ -186,8 +186,8 @@ pip install -r requirements.txt
 pip uninstall torch torchvision
 5. conda install pytorch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 pytorch-cuda=12.1 -c pytorch -c nvidia
 6. pip install kaolin==0.15.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.1_cu121.html
-7.
+7. diffusers == 0.20.0
 git clone https://github.com/CompVis/taming-transformers.git
 pip install -e taming-transformers/
 git clone https://github.com/openai/CLIP.git
-pip install -e CLIP/ (edited) 
+pip install -e CLIP/ 
