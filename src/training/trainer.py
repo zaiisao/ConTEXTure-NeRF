@@ -1205,6 +1205,11 @@ class TEXTure:
                 f'project_back_z_normals_{i}'
             )
 
+        #MJ: Render using the learned self.meta_texture_img (which was learned in the init of TexturedMesh)
+        meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
+                                                    use_meta_texture=True, render_cache=None)
+        best_z_normals = meta_outputs['image']
+        
         optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
             
@@ -1222,12 +1227,13 @@ class TEXTure:
                 outputs = self.mesh_model.render(background=background,
                                                 render_cache=render_cache)
                 rgb_render = outputs['image']
+                z_normals = outputs['normal'][:,-1,:,:]
 
                 # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 #BY MJ:
-                loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                # loss = (render_update_mask * self.meta_texture_img * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                #MJ: loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                loss = (render_update_mask * best_z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
                 optimizer.step()
