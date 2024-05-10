@@ -542,6 +542,13 @@ class StableDiffusion(nn.Module):
             #     latents = None#torch.randn((64, 64), device=self.device)
             # else:
             latents = self.encode_imgs(pred_rgb_small) # JA: Convert the rgb_render_output to the latent space of shape 64x64
+            # def encode_imgs(self, imgs):
+            #       # imgs: [B, 3, H, W]
+
+            #          imgs = 2 * imgs - 1
+
+            #          posterior = self.vae.encode(imgs).latent_dist
+            #          latents = posterior.sample() * 0.18215
 
             if self.use_inpaint:
                 update_mask_small = F.interpolate(update_mask, (image_size, image_size))

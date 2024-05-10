@@ -357,8 +357,8 @@ class TEXTure:
             if i == 0:
                 # JA: The first viewpoint should always be frontal. It creates the extended version of the cropped
                 # front view image.
-                rgb_output_front, object_mask_front = self.paint_viewpoint(data, should_project_back=True)
-
+                #MJ: for debugging:   rgb_output_front, object_mask_front = self.paint_viewpoint(data, should_project_back=True)
+                rgb_output_front, object_mask_front = self.paint_viewpoint(data, should_project_back=False)
                 # JA: The object mask is multiplied by the output to erase any generated part of the image that
                 # "leaks" outside the boundary of the mesh from the front viewpoint. This operation turns the
                 # background black, but we would like to use a white background, which is why we set the inverse 
