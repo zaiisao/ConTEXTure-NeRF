@@ -424,7 +424,7 @@ class TexturedMeshModel(nn.Module):
         return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function
 
-    def get_params_max_z_normal(self):
+    def get_params_max_z_normals(self):
          return [self.meta_texture_img]
         # return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
                                                             # are not used as parameters of the loss function

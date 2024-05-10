@@ -95,6 +95,8 @@ class OptimConfig:
     # For Diffusion model
     no_noise: bool = False
 
+    #MJ: added by MJ
+    learn_max_z_normals: bool = False
 
 @dataclass
 class LogConfig:
