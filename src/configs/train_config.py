@@ -96,7 +96,7 @@ class OptimConfig:
     no_noise: bool = False
 
     #MJ: added by MJ
-    learn_max_z_normals: bool = False
+    learn_max_z_normals: bool = True
 
 @dataclass
 class LogConfig:
