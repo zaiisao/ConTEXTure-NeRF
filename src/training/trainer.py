@@ -131,6 +131,12 @@ class TEXTure:
             weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
 
             self.view_weights  = weight_masks
+            
+            for i in range( len(self.thetas) ):
+               
+                self.log_train_image(
+                    torch.cat((weight_masks[i][None], weight_masks[i][None], weight_masks[i][None]), dim=1),
+                    f'debug:weight_masks_{i}' )
         
         else: #MJ: when you use learn_max_z_normals, you compute the max_z_normals after you project_back the front view iamge
               #by calling self.paint_viewpoint(), because it requires the initial meta_textuure_img,
@@ -614,13 +620,16 @@ class TEXTure:
                
                 self.log_train_image(
                     torch.cat((z_normals[i][None], z_normals[i][None], z_normals[i][None]), dim=1),
-                    f'z_normals_{i}'
+                    f'debug:z_normals_{i}'
                 )
                 self.log_train_image( torch.cat( (max_z_normals[i][None], max_z_normals[i][None],
-                                                   max_z_normals[i][None]), dim=1), f'max_z_normals_gray_{i}' )
+                                                   max_z_normals[i][None]), dim=1), f'debug:max_z_normals_gray_{i}' )
                 
-                self.log_train_image( max_z_normals_red[i][None], f'max_z_normals_red_{i}' )
-         
+                self.log_train_image( max_z_normals_red[i][None], f'debug:max_z_normals_red_{i}' )
+                
+                self.log_train_image( torch.cat( (self.view_weights[i][None], self.view_weights[i][None], self.view_weights[i][None]), dim=1),
+                                      f'debug:view_weights_{i}' )  #MJ: view_weights: (B,1,H,W)
+          
         #End if self.cfg.optim.learn_max_z_normals
             
             
@@ -1399,7 +1408,7 @@ class TEXTure:
             else:
                 tensor = einops.rearrange(tensor, '(1) c h w -> h w c').detach().cpu().numpy()
             Image.fromarray((tensor * 255).astype(np.uint8)).save(
-                self.train_renders_path / f'{self.paint_step:04d}_{name}.jpg')
+                self.train_renders_path / f'debug:{name}.jpg')
 
     def log_diffusion_steps(self, intermediate_vis: List[Image.Image]):
         if len(intermediate_vis) > 0:
