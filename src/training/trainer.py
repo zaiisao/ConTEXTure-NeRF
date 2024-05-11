@@ -137,6 +137,12 @@ class TEXTure:
                 self.log_train_image(
                     torch.cat((weight_masks[i][None], weight_masks[i][None], weight_masks[i][None]), dim=1),
                     f'debug:weight_masks_{i}' )
+                
+                
+                self.log_train_image(
+                    torch.cat(( normals_image[i][None,-1:], normals_image[i][None,-1:], normals_image[i][None,-1:]), dim=1),
+                    f'debug:z_normals_{i}' )
+                #MJ: face_normals[views, 2, face_ids] 
         
         else: #MJ: when you use learn_max_z_normals, you compute the max_z_normals after you project_back the front view iamge
               #by calling self.paint_viewpoint(), because it requires the initial meta_textuure_img,
@@ -605,13 +611,13 @@ class TEXTure:
             # # JA: It computes the self.meta_texture_img which contains the best z normals of the pixel
             # # images
             self.project_back_max_z_normals()
-            #MJ: Render using the learned self.meta_texture_img   by  self.project_back_max_z_normals()           
+            #MJ: Render all views using the learned self.meta_texture_img   by  self.project_back_max_z_normals()           
             meta_outputs = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii,
                                                     background=torch.Tensor([0, 0, 0]).to(self.device),
                                                     use_meta_texture=True, render_cache=None)
             z_normals = meta_outputs["normals"][:,2:3,:,:].clamp(0, 1)
             max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1) 
-            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=-10 ) 
+            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
             #MJ: try to vary alpha from -1 to -10: If alpha approaches -10, the face_idx whose z_normals are greater have more weights
     
             #MJ: for debugging:
@@ -1180,7 +1186,8 @@ class TEXTure:
         # between the specific image and the rendered image, rendered using the current estimate
         # of the texture atlas.
         # losses = []
-        for _ in tqdm(range(200), desc='fitting mesh colors for the front view'):
+        with  tqdm(range(200), desc='project_back (SD2): fitting mesh colors for the front view') as pbar:
+          for i in pbar:  
             optimizer.zero_grad()
             outputs = self.mesh_model.render(background=background,
                                              render_cache=render_cache)
@@ -1203,6 +1210,8 @@ class TEXTure:
                                         current_z_mask == 1][:, :1]
                 loss += (masked_current_z_normals - masked_last_z_normals.detach()).pow(2).mean()
             # losses.append(loss.cpu().detach().numpy())
+            
+            pbar.set_description(f"project_back (SD2): Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.7f}")
             loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                             # the network, that is, the pixel value of the texture atlas
             optimizer.step()
@@ -1263,12 +1272,16 @@ class TEXTure:
         # losses = []
 
         # JA: TODO: Add num_epochs hyperparameter
-        with tqdm(range(200), desc='fitting mesh colors') as pbar:
-            for i in pbar:
+        with tqdm(range(200), desc='project_back_only_texture_atla: fitting mesh colors') as pbar:
+            for iter in pbar:
                 optimizer.zero_grad()
                 outputs = self.mesh_model.render(background=background,
                                                 render_cache=render_cache)
                 rgb_render = outputs['image']
+                
+                for i in range(rgb_render.shape[0]):
+                    self.log_train_image(rgb_render[i][None] * render_update_mask[i][None], f'rgb-output of the render net_{i}')  
+           
                 #MJ: z_normals = outputs['normal'][:,-1,:,:]
 
                 # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
@@ -1285,7 +1298,7 @@ class TEXTure:
                 loss.backward(retain_graph=True) # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                 # the network, that is, the pixel value of the texture atlas
                                 #MJ:  if the loss is now dependent on some stateful or iterative operation, it might need to retain the graph.
-                pbar.set_description(f"Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.4f}")
+                pbar.set_description(f"zero123plus: Fitting mesh colors -Epoch {iter + 1}, Loss: {loss.item():.7f}")
                 #loss.backward()
                 optimizer.step()
 
@@ -1301,50 +1314,65 @@ class TEXTure:
         optimizer = torch.optim.Adam(self.mesh_model.get_params_max_z_normals(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                         eps=1e-15)
             
-        for v1 in range( len(self.thetas) ):    # scan over the 7 views 
+        for v in range( len(self.thetas) ):    # scan over the 7 views 
             #MJ: Compute the max_z_normals viewed in view v1 by comparing it with z_normals of the other views v2
             
-            # for v2 in range( len(self.thetas) ):    # scan over the 7 views 
-            
-            #     if v1 != v2:
                     #MJ: Render the max_z_normals using  self.meta_texure_img which has been learned using the previous view z_normals
                     # At the beginning of the for loop, self.meta_texture_img is set to 0
                     
-                    meta_output = self.mesh_model.render(theta=self.thetas[v1], phi=self.phis[v1], radius=self.radii[v1],
+                    meta_output = self.mesh_model.render(theta=self.thetas[v], phi=self.phis[v], radius=self.radii[v],
                                                         background=torch.Tensor([0, 0, 0]).to(self.device),
                                                                 use_meta_texture=True, render_cache=None)
                     render_cache =  meta_output['render_cache']
-                    curr_max_z_normals_pred = meta_output['image'][:,0:1,:,:].clamp(0,1)   #MJ: z_normals_cache is the projected meta_texture_img, which is zero at first
+                    curr_max_z_normals_pred = meta_output['image'][:,0:1,:,:]   #MJ: z_normals_cache is the projected meta_texture_img, which is zero at first
                     
-                    curr_z_normals = meta_output['normals'][:,2:3,:,:].clamp(0,1)   
+                    curr_z_normals = meta_output['normals'][:,2:3,:,:]   
                 
                     #MJ: z_normals is the z component of the normal vectors of the faces seen by each view
                     curr_z_mask = meta_output['mask']   #MJ: shape = (1,1,1200,1200)
-                    curr_z_mask_flattened = curr_z_mask.flatten()  #MJ: curr_z_mask_flattened.shape: torch.Size([1440000]) = 1200 x 1200
+                    #curr_z_mask_flattened = curr_z_mask.flatten()  #MJ: curr_z_mask_flattened.shape: torch.Size([1440000]) = 1200 x 1200
                        
                    #MJ: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True),
                    # rather than torch.tensor(sourceTensor).        
                    # max_z_normals_target = torch.tensor(curr_max_z_normals_pred)   #MJ: max_z_normals_target will refer to a copy of max_z_normals_pred
                     max_z_normals_target = curr_max_z_normals_pred.clone().detach() 
-                    #MJ: Compare the curr max_z_normals and the curr_z_normals of the 
-                    max_z_normals_target[0, 0, :, :] = torch.max(curr_max_z_normals_pred[0, 0, :, :], curr_z_normals[0, 0, :, :])    
+                    #MJ: Compare the curr max_z_normals and the curr_z_normals and update  max_z_normals_target
+                    max_z_normals_target[0, 0, :, :] = torch.max(max_z_normals_target[0, 0, :, :], curr_z_normals[0, 0, :, :])    
                     
                     self.log_train_image(torch.cat([max_z_normals_target, max_z_normals_target,max_z_normals_target], dim=1),
                                         f'max_z_normals_target')
+                    #MJ: curr_z_mask has the same number of batch and channel dimensions as max_z_normals_target and is meant to mask the spatial dimensions (height, width).
+                    # The resulting tensor, masked_curr_z_normals_target, will contain only the values from max_z_normals_target where curr_z_mask is True.
                     
-                    masked_curr_z_normals_target =   max_z_normals_target.reshape(1, 1, -1)[:, :,curr_z_mask_flattened == 1]  
-                    #MJ:  curr_z_normals.reshape(1, 1, -1)[:, :,curr_z_mask_flattened == 1]: shape = (1,1,390898)   
+                 
+                    curr_max_z_normals_pred = curr_max_z_normals_pred * curr_z_mask.float()    
+                    max_z_normals_target = max_z_normals_target * curr_z_mask.float()    
+                    #MJ: curr_z_normals: (1,1,1200,1200)                 
+                               
+                                
+                    #MJ: # Zero out values where the mask is False: masked_curr_z_normals_target = max_z_normals_target * curr_z_mask.float()    
                     #MJ: curr_z_normals: (1,1,1200,1200)                    
-                    with  tqdm(range(200), desc='fitting max_z_normals') as pbar:
-                        for i in pbar:
+                    with  tqdm(range(500), desc='fitting max_z_normals') as pbar:
+                        for iter in pbar:
                             optimizer.zero_grad()
                             
                             
-                            masked_max_z_normals_pred = \
-                                curr_max_z_normals_pred.reshape(1, 1, -1)[:, :,curr_z_mask_flattened == 1]                   
-                    
-                            loss = (masked_max_z_normals_pred - masked_curr_z_normals_target.detach()).pow(2).mean()      
                             
+                            # Yes, mathematically speaking, both the loop-based and the fully vectorized approaches are equivalent
+                            # in terms of how they compute the mean squared error (MSE) across the batch. 
+                            # Both methods are designed to achieve the same result: computing the MSE for each batch element separately
+                            # and then averaging these MSE values over the batch. Here’s a bit more detailed breakdown of the equivalency:
+                                    
+                            # loss = 0
+                            # for i in range( masked_max_z_normals_pred.shape[0]):
+                            #    # Compute the mean squared error for each batch element separately                          
+                            #     view_loss =  (masked_max_z_normals_pred[i] - masked_curr_z_normals_target[i].detach()).pow(2).mean()      
+                            
+                            #     loss += view_loss #Accumulate the individual loss for each viewpoint
+                                      
+                            # loss /=  masked_max_z_normals_pred.shape[0]
+                            
+                            loss = ( curr_max_z_normals_pred -   max_z_normals_target.detach()).pow(2).mean()      
                             
                         #confer the code of project_back():
                         # meta_outputs = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device),
@@ -1360,14 +1388,26 @@ class TEXTure:
                             loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                                             # the network, that is, the pixel value of the texture atlas
                             optimizer.step()
-                            pbar.set_description(f"Fitting max_z_normals -view={v1}: Epoch={i + 1}, Loss: {loss.item():.4f}")
+                            pbar.set_description(f"Fitting max_z_normals -view={v}: Epoch={iter + 1}, Loss: {loss.item():.7f}")
                             
                             #MJ: Render the learned meta_texture_img to produce the new  curr_max_z_normals_pred 
                             meta_output = self.mesh_model.render( background=torch.Tensor([0, 0, 0]).to(self.device),
                                                                 use_meta_texture=True, render_cache=render_cache)
-                            curr_max_z_normals_pred = meta_output['image'][:,0:1,:,:].clamp(0,1)  
+                            curr_max_z_normals_pred = meta_output['image'][:,0:1,:,:]  
                             #MJ: z_normals_cache is the projected meta_texture_img, which is zero at first
+                            
+                            #MJ: Compare the curr max_z_normals and the curr_z_normals and   max_z_normals_target
+                            # => The new max_z_normal target is defined as we move to a new viewpoint, not within the same viewpoint
+                            # max_z_normals_target[0, 0, :, :] = torch.max(curr_max_z_normals_pred[0, 0, :, :], curr_z_normals[0, 0, :, :])    
                     
+                    
+                            # Compute the difference between max_z_normals and z_normals
+                            
+                            curr_max_z_normals_pred  = curr_max_z_normals_pred * curr_z_mask.float()                                                        
+                                
+                            delta =  curr_max_z_normals_pred  -   max_z_normals_target.detach() 
+                            print(f'progress toward max: not yet  for view-{v}:{delta.min()}')
+                            print(f'progress toward max: overshoot  for view-{v}:{delta.max()}')
                     #End for _ in tqdm(range(200), desc='fitting max_z_normals')    
             #End for v2 in range(self.thetas)    # scan over the 7 views 
         #End for v1 in range(self.thetas)    # scan over the 7 views 
@@ -1391,10 +1431,18 @@ class TEXTure:
         
         # Compute the difference between max_z_normals and z_normals
         delta = max_z_normals - z_normals
-
+        for i in range( delta.shape[0]):
+            print(f'min delta for view-{i}:{delta[i].min()}')
+            print(f'max  delta for view-{i}:{delta[i].max()}')
+        #MJ: delta is supposed to be greater than 0; But sometimes, z_normals is greater than max_z_normals.
+        # It means that project_back_max_z_normals() was not fully successful.
+        abs_delta = torch.abs( delta )
         # Calculate the weights using an exponential function, multiplying by negative alpha
-        weights = torch.exp(alpha * delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
+        weights = torch.exp(alpha * abs_delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
         
+        for i in range( weights.shape[0]):
+            print(f'min weights  for view-{i}:{weights[i].min()}')
+            print(f'max  weights for view-{i}:{weights[i].max()}')
         # Normalize to have the desired shape (B, 1, H, W)
         #weights = weights.view(weights.size(0), 1, weights.size(1), weights.size(2))
         
@@ -1407,6 +1455,14 @@ class TEXTure:
                 tensor = cm.seismic(tensor.detach().cpu().numpy())[:, :, :3]
             else:
                 tensor = einops.rearrange(tensor, '(1) c h w -> h w c').detach().cpu().numpy()
+            
+            if np.any(np.isnan(tensor)) or np.any(np.isinf(tensor)):
+    #     # Raise an exception if there are any NaNs or infinite values
+    #      tensor = einops.rearrange(tensor, '(1) c h w -> h w c').detach().cpu().numpy()
+    #      Image.fromarray( (tensor * 255).astype(np.uint8) ).save('experiments'/f'debug:NanOrInf.jpg')
+
+                raise ValueError("Tensor contains NaNs or infinite values")
+            
             Image.fromarray((tensor * 255).astype(np.uint8)).save(
                 self.train_renders_path / f'debug:{name}.jpg')
 
