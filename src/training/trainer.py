@@ -1313,6 +1313,8 @@ class TEXTure:
     def project_back_max_z_normals(self):
         optimizer = torch.optim.Adam(self.mesh_model.get_params_max_z_normals(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                         eps=1e-15)
+        
+        
             
         for v in range( len(self.thetas) ):    # scan over the 7 views 
             #MJ: Compute the max_z_normals viewed in view v1 by comparing it with z_normals of the other views v2
@@ -1330,6 +1332,42 @@ class TEXTure:
                 
                     #MJ: z_normals is the z component of the normal vectors of the faces seen by each view
                     curr_z_mask = meta_output['mask']   #MJ: shape = (1,1,1200,1200)
+                    
+                    #MJ: Try blurring the object-mask "curr_z_mask" with Gaussian blurring: The following code is a simply
+                    # cut and paste from project-back:
+                    object_mask = curr_z_mask
+                    eroded_masks = []
+                    for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
+                        eroded_mask = cv2.erode(object_mask[i, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))
+                        eroded_masks.append(torch.from_numpy(eroded_mask).to(self.device).unsqueeze(0).unsqueeze(0))
+
+                    # Convert the list of tensors to a single tensor
+                    eroded_object_mask = torch.cat(eroded_masks, dim=0)
+                    # object_mask = torch.from_numpy(
+                    #     cv2.erode(object_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
+                    #     object_mask.device).unsqueeze(0).unsqueeze(0)
+                    # render_update_mask = object_mask.clone()
+                    render_update_mask = eroded_object_mask.clone()
+
+
+
+                    # blurred_render_update_mask = torch.from_numpy(
+                    #     cv2.dilate(render_update_mask[0, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))).to(
+                    #     render_update_mask.device).unsqueeze(0).unsqueeze(0)
+                    dilated_masks = []
+                    for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
+                        dilated_mask = cv2.dilate(render_update_mask[i, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))
+                        dilated_masks.append(torch.from_numpy(dilated_mask).to(self.device).unsqueeze(0).unsqueeze(0))
+
+                    # Convert the list of tensors to a single tensor
+                    blurred_render_update_mask = torch.cat(dilated_masks, dim=0)
+                    blurred_render_update_mask = utils.gaussian_blur(blurred_render_update_mask, 21, 16)
+
+                    # Do not get out of the object
+                    blurred_render_update_mask[object_mask == 0] = 0
+                    
+                    curr_z_mask =  blurred_render_update_mask
+
                     #curr_z_mask_flattened = curr_z_mask.flatten()  #MJ: curr_z_mask_flattened.shape: torch.Size([1440000]) = 1200 x 1200
                        
                    #MJ: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True),
@@ -1406,8 +1444,8 @@ class TEXTure:
                             curr_max_z_normals_pred  = curr_max_z_normals_pred * curr_z_mask.float()                                                        
                                 
                             delta =  curr_max_z_normals_pred  -   max_z_normals_target.detach() 
-                            print(f'progress toward max: not yet  for view-{v}:{delta.min()}')
-                            print(f'progress toward max: overshoot  for view-{v}:{delta.max()}')
+                            # print(f'progress toward max: not yet  for view-{v}:{delta.min()}')
+                            # print(f'progress toward max: overshoot  for view-{v}:{delta.max()}')
                     #End for _ in tqdm(range(200), desc='fitting max_z_normals')    
             #End for v2 in range(self.thetas)    # scan over the 7 views 
         #End for v1 in range(self.thetas)    # scan over the 7 views 
