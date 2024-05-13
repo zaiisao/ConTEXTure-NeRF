@@ -107,8 +107,8 @@ class Zero123PlusDataset:
                                                             # target views relative to the zero123++ paper. The first
                                                             # theta, 60, is the front view elevation angle.
 
-        # (90 - 30, 30), (90 - 30, 150), (90 - 30, 270), (90 - (-20), 90), (90 - (-20), 210), (90 - (-20), 330)
-        # (30, 0), (30, 30), (30, 150), (30, 270), (80, 90), (80, 210), (80, 330)
+        #(theta, phi) in TEXTure = (90 - 30, 30), (90 - 30, 150), (90 - 30, 270), (90 - (-20), 90), (90 - (-20), 210), (90 - (-20), 330)
+        #                           (30, 0), (30, 30), (30, 150), (30, 270), (80, 90), (80, 210), (80, 330)
 
         # JA: In Zero123++, the elevation angle is measured from the horizontal axis, that is, 90 degrees from the
         # vertical axis. But in TEXTure, the elevation angle is measured from the vertical axis, as in the Wikipedia

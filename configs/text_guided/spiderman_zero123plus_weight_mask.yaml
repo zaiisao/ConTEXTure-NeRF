@@ -1,8 +1,11 @@
 log:
-  exp_name: spiderman_0123plus_z_normal_no_blend
+  exp_name: spiderman_0123plus_weight_mask
 guide:
   text: "A photo of Spiderman, {} view"
   append_direction: True
   shape_path: shapes/human.obj
   guidance_scale: 10
   use_zero123plus: True
+optim:
+  #seed: 3
+  learn_max_z_normals: False
