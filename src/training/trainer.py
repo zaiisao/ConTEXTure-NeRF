@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-#MJ: commented out for debugging: from torch_scatter import scatter_max
+from torch_scatter import scatter_max
 
 import torchvision
 from PIL import Image
@@ -83,18 +83,18 @@ class TEXTure:
         
         
         # Set the camera poses:
-        self.mesh_model.thetas = []
-        self.mesh_model.phis = []
-        self.mesh_model.radii = []
+        self.thetas = []
+        self.phis = []
+        self.radii = []
        
         for i, data in enumerate(self.dataloaders['train']):
             theta, phi, radius = data['theta'], data['phi'], data['radius']
             phi = phi - np.deg2rad(self.cfg.render.front_offset)
             phi = float(phi + 2 * np.pi if phi < 0 else phi)
 
-            self.mesh_model.thetas.append(theta)
-            self.mesh_model.phis.append(phi)
-            self.mesh_model.radii.append(radius)
+            self.thetas.append(theta)
+            self.phis.append(phi)
+            self.radii.append(radius)
 
         
         augmented_vertices = self.mesh_model.mesh.vertices
@@ -108,9 +108,9 @@ class TEXTure:
             self.mesh_model.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.mesh_model.face_attributes.repeat(batch_size, 1, 1, 1),
             
-            elev=torch.tensor( self.mesh_model.thetas).to(self.device), #MJ: elev should a tensor
-            azim=torch.tensor( self.mesh_model.phis).to(self.device),
-            radius=torch.tensor( self.mesh_model.radii).to(self.device),
+            elev=torch.tensor( self.thetas).to(self.device), #MJ: elev should a tensor
+            azim=torch.tensor( self.phis).to(self.device),
+            radius=torch.tensor( self.radii).to(self.device),
             
             look_at_height=self.mesh_model.dy,
             background_type='none'
@@ -120,18 +120,18 @@ class TEXTure:
 
         #MJ: get the binary masks for each view which indicates how much the image rendered from each view
         # should contribute to the texture atlas over the mesh which is the cause of the image
-        # face_view_map = self.create_face_view_map(face_idx)
+        face_view_map = self.create_face_view_map(face_idx)
 
         # logger.info(f'Creating weight masks for each view')
-        # weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
+        self.weight_masks = self.compare_face_normals_between_views(face_view_map, face_normals, face_idx)
 
        
         # JA: It computes the self.meta_texture_img which contains the best z normals of the pixel
         # images
-        self.project_back_max_z_normals(
-            background=None, object_mask=mask, z_normals=normals_image[:,2:3,:,:],
-            face_normals=face_normals, face_idx=face_idx           
-        )
+        # self.project_back_max_z_normals(
+        #     background=None, object_mask=mask, z_normals=normals_image[:,2:3,:,:],
+        #     face_normals=face_normals, face_idx=face_idx           
+        # )
       
 
         logger.info(f'Successfully initialized {self.cfg.log.exp_name}')
@@ -684,8 +684,8 @@ class TEXTure:
         #MJ:  self.project_back_only_texture_atlas:
         self.project_back_only_texture_atlas(
              render_cache=render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
-            object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache
-            #,  weight_masks=self.weight_masks
+            object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
+             weight_masks=self.weight_masks
         )
         
         
@@ -1168,7 +1168,7 @@ class TEXTure:
             
     def project_back_only_texture_atlas(self, render_cache: Dict[str, Any], background: Any, rgb_output: torch.Tensor,
                      object_mask: torch.Tensor, update_mask: torch.Tensor, z_normals: torch.Tensor,
-                      z_normals_cache: torch.Tensor #, weight_masks: torch.Tensor                   
+                      z_normals_cache: torch.Tensor, weight_masks: torch.Tensor                   
                      ):
         eroded_masks = []
         for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
@@ -1239,7 +1239,7 @@ class TEXTure:
                 #2) use weight-masks based on z_normals
                 # weight_masks = self.compute_view_weights( z_normals )
                 #3) use weight-masks as best_z_normals
-                weight_masks = best_z_normals 
+                #weight_masks = best_z_normals 
                 #MJ: loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
                 loss.backward(retain_graph=True) # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
