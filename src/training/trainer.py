@@ -354,7 +354,14 @@ class TEXTure:
 
     def paint(self):
         if self.cfg.guide.use_zero123plus:
+            start_time = time.perf_counter()  # Record the start time
+            
             self.paint_zero123plus()
+            end_time = time.perf_counter()  # Record the end time
+            total_elapsed_time = end_time - start_time  # Calculate elapsed time
+
+            print(f"Total Elapsed time: {total_elapsed_time:.4f} seconds")
+
         else:
             self.paint_legacy()
 
@@ -398,6 +405,7 @@ class TEXTure:
                 front_image = rgb_output_front * object_mask_front \
                     + torch.ones_like(rgb_output_front, device=self.device) * (1 - object_mask_front)
 
+  
             # JA: Even though the legacy function calls self.mesh_model.render for a similar purpose as for what
             # we do below, we still do the rendering again for the front viewpoint outside of the function for
             # the sake of brevity.
@@ -457,6 +465,9 @@ class TEXTure:
         min_h, min_w, max_h, max_w = utils.get_nonzero_region(object_mask_front[0, 0])
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
         cropped_front_image = crop(front_image)
+        
+        self.log_train_image(cropped_front_image, 'paint_zero123plus:front_image')
+        self.log_train_image(cropped_front_image, 'paint_zero123plus:cropped_front_image')
 
         should_pad = False
 
@@ -485,7 +496,7 @@ class TEXTure:
             torch.cat((cropped_depths_rgba[3], cropped_depths_rgba[6]), dim=3),
         ), dim=2)
 
-        self.log_train_image(cropped_front_image, 'cropped_front_image')
+        #self.log_train_image(cropped_front_image, 'cropped_front_image')
         self.log_train_image(cropped_depth_grid[:, 0:3], 'cropped_depth_grid')
 
         # JA: From: https://pytorch.org/vision/main/generated/torchvision.transforms.ToPILImage.html
@@ -880,10 +891,10 @@ class TEXTure:
         z_normals_cache = meta_output['image'].clamp(0, 1)
         edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
 
-        self.log_train_image(rgb_render, 'rendered_input')
-        self.log_train_image(depth_render[0, 0], 'depth', colormap=True)
-        self.log_train_image(z_normals[0, 0], 'z_normals', colormap=True)
-        self.log_train_image(z_normals_cache[0, 0], 'z_normals_cache', colormap=True)
+        self.log_train_image(rgb_render, 'paint_viewpoint:rgb_render')
+        self.log_train_image(depth_render[0, 0], 'paint_viewpoint:depth', colormap=True)
+        self.log_train_image(z_normals[0, 0], 'paint_viewpoint:z_normals', colormap=True)
+        self.log_train_image(z_normals_cache[0, 0], 'paint_viewpoint:z_normals_cache', colormap=True)
 
         # text embeddings
         if self.cfg.guide.append_direction:
@@ -908,8 +919,8 @@ class TEXTure:
             logger.info(f'Update ratio {update_ratio:.5f} is small for an editing step, skipping')
             return
 
-        self.log_train_image(rgb_render * (1 - update_mask), name='masked_input')
-        self.log_train_image(rgb_render * refine_mask, name='refine_regions')
+        self.log_train_image(rgb_render * (1 - update_mask), name='paint_viewpoint:masked_rgb_render')
+        self.log_train_image(rgb_render * refine_mask, name='paint_viewpoint:refine_rgb_render')
 
         # Crop to inner region based on object mask
         min_h, min_w, max_h, max_w = utils.get_nonzero_region(outputs['mask'][0, 0])
@@ -918,8 +929,8 @@ class TEXTure:
                                               # In our experiment, 1200 is cropped to 827
         cropped_depth_render = crop(depth_render)
         cropped_update_mask = crop(update_mask)
-        self.log_train_image(cropped_rgb_render, name='cropped_input')
-        self.log_train_image(cropped_depth_render.repeat_interleave(3, dim=1), name='cropped_depth')
+        self.log_train_image(cropped_rgb_render, name='paint_viewpoint:cropped_rgb_render')
+        self.log_train_image(cropped_depth_render.repeat_interleave(3, dim=1), name='paint_viewpoint:cropped_depth')
 
         checker_mask = None
         if self.paint_step > 1 or self.cfg.guide.initial_texture is not None:
@@ -976,7 +987,7 @@ class TEXTure:
                                                                     theta=data['base_theta'] - data['theta'],
                                                                     condition_guidance_scales=condition_guidance_scales)
 
-        self.log_train_image(cropped_rgb_output, name='direct_output')
+        self.log_train_image(cropped_rgb_output, name='paint_viewpoint:cropped_rgb_output')
         self.log_diffusion_steps(steps_vis)
         # JA: cropped_rgb_output always has a shape of (512, 512); recover the resolution of the nonzero rendered image (e.g. (827, 827))
         cropped_rgb_output = F.interpolate(cropped_rgb_output, 
@@ -996,7 +1007,14 @@ class TEXTure:
             fitted_pred_rgb, _ = self.project_back(render_cache=render_cache, background=background, rgb_output=rgb_output,
                                                 object_mask=object_mask, update_mask=update_mask, z_normals=z_normals,
                                                 z_normals_cache=z_normals_cache)
-            self.log_train_image(fitted_pred_rgb, name='fitted')
+                                                                                             
+            self.log_train_image(fitted_pred_rgb, name='paint_viewpoint:fitted_pred_rgb')
+            #MJ: for debugging: what happens if the following update of rgb_output is not made, 
+            # when the previous rgb_output which was not rendered using the learned texture atlas from the front viewpoint.
+            # rgb_output = fitted_pred_rgb  #MJ: fitted_pred_rgb  is the rendered image obtained using the learned texture atlas from the current view
+            # outputs['image'] =  rgb_output  #MJ: This is not need for the current experiment
+            
+            
 
         # JA: Zero123 needs the input image without the background
         # rgb_output is the generated and uncropped image in pixel space
@@ -1019,7 +1037,7 @@ class TEXTure:
         #     'theta': data['theta']
         # })
 
-        self.log_train_image(zero123_input, name='zero123_input')
+        self.log_train_image(zero123_input, name='paint_viewpoint:zero123_cond_image')
 
         return rgb_output, object_mask
 
