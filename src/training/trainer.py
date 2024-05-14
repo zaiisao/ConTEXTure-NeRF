@@ -415,7 +415,7 @@ class TEXTure:
         max_cropped_image_height, max_cropped_image_width = 0, 0
         cropped_depth_sizes = []
         object_masks =[]
-        
+        render_caches = []
         for i, data in enumerate(self.dataloaders['train']):
             if i == 0:
                 # JA: The first viewpoint should always be frontal. It creates the extended version of the cropped
@@ -456,8 +456,8 @@ class TEXTure:
             phi = float(phi + 2 * np.pi if phi < 0 else phi) # JA: We convert negative phi angles to positive
 
             outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius, background=background)
-            render_cache = outputs['render_cache'] # JA: All the render outputs have the shape of (1200, 1200)
-            
+            self.render_cache = outputs['render_cache'] # render_cache is a dict           
+   
             object_masks.append( outputs['mask'])
             
             #MJ: not need for our purpose:
@@ -501,7 +501,8 @@ class TEXTure:
             cropped_depths_rgba.append(cropped_depth_rgba)
         #End      for i, data in enumerate(self.dataloaders['train'])
         
-        self.object_masks = torch.cat( object_masks, dim=0)
+        self.object_mask = torch.cat( object_masks, dim=0)
+        self.render_cache = torch.cat( render_caches, dim=0)
         
         min_h, min_w, max_h, max_w = utils.get_nonzero_region(object_mask_front[0, 0])
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
@@ -753,6 +754,7 @@ class TEXTure:
         # JA: Here we call the Zero123++ pipeline
 
         zero123_start_time = time.perf_counter()  # Record the end time
+        
         result = self.zero123plus(
             cond_image,
             depth_image=depth_image,
@@ -763,11 +765,12 @@ class TEXTure:
         zero123_end_time = time.perf_counter()  # Record the end time
         elapsed_time = zero123_end_time - zero123_start_time # Calculate elapsed time
 
-        print(f"Elapsed time in zero123: {elapsed_time} seconds")
+        print(f"Elapsed time in zero123 sampling: {elapsed_time} seconds")
 
       #MJ: Now that the images for the 7 views are generated, project back them to construct the texture atlas
       
-            
+        project_back_prep_start_time =  time.perf_counter()  # Record the end time
+               
         grid_image = torchvision.transforms.functional.pil_to_tensor(result).to(self.device).float() / 255
 
         self.log_train_image(grid_image[None], 'zero123plus:result_grid_image')
@@ -863,13 +866,25 @@ class TEXTure:
             
         # )
         
+        project_back_prep_end_time =  time.perf_counter()  # Record the end time
+        
+        elapsed_time = project_back_prep_end_time - project_back_prep_start_time
+        print(f'project-back prep time={elapsed_time:0.4f}')
+        
+        
+        project_back_start_time =  time.perf_counter()  # Record the end time
         self.project_back_only_texture_atlas(
-             render_cache=None, background=background, rgb_output=torch.cat(rgb_outputs),
-            object_mask=self.object_masks, update_mask=self.object_masks, z_normals=None, z_normals_cache=None
+             render_cache=self.render_cache, background=background, rgb_output=torch.cat(rgb_outputs),
+            object_mask=self.object_mask, update_mask=self.object_mask, z_normals=None, z_normals_cache=None
             
         )
         
-         
+                
+        project_back_end_time =  time.perf_counter()  # Record the end time 
+        
+        elapsed_time = project_back_end_time - project_back_start_time
+        print(f'project-back  time={elapsed_time:0.4f}')
+        
         
         self.mesh_model.change_default_to_median()
         logger.info('Finished Painting ^_^')
@@ -1447,13 +1462,15 @@ class TEXTure:
         with tqdm(range(200), desc='project_back_only_texture_atla: fitting mesh colors') as pbar:
             for iter in pbar:
                 optimizer.zero_grad()
-                outputs = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii,
-                                                 background=background,
-                                                render_cache=render_cache)
+                outputs = self.mesh_model.render(background=background,
+                                                render_cache=render_cache)  
+                #MJ: with render_cache not None => render() omits the raterization process, uses the cache of its results
+                #  and only performs the texture mapping projection => take much less time than performing a full rendering 
+                                                   
                 rgb_render = outputs['image']
                 
-                for i in range(rgb_render.shape[0]):
-                    self.log_train_image(rgb_render[i][None] * render_update_mask[i][None], f'rgb-output of the render net_{i}')  
+                # for i in range(rgb_render.shape[0]):
+                #     self.log_train_image(rgb_render[i][None] * render_update_mask[i][None], f'project_back: rgb-output_{i}')  
            
                 #MJ: z_normals = outputs['normal'][:,-1,:,:]
 
