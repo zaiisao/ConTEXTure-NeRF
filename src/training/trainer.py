@@ -396,6 +396,10 @@ class TEXTure:
 
     def paint_zero123plus(self):
         logger.info('Starting training ^_^')
+        
+        zero123_denoising_prep_start_time = time.perf_counter()  # Record the end time
+        
+       
         # Evaluate the initialization: Currently self.texture_img and self.meta_texture_img are not learned at all;
         #MJ:  Because we are not learning the textures sequentially scanning over the viewpoints, this evaluation is meaningless
         #MJ: self.evaluate(self.dataloaders['val'], self.eval_renders_path)
@@ -650,10 +654,18 @@ class TEXTure:
         
         self.log_train_image(cropped_rgb_renders_tensor, 'on_step_end:cropped_rgb_renders')
         
+        zero123_denoising_prep_end_time = time.perf_counter() 
+        elapsed_time = zero123_denoising_prep_end_time - zero123_denoising_prep_start_time # Calculate elapsed time
+      
+        print(f"Elapsed time in zero123_prep: {elapsed_time} seconds")
+              
             
         @torch.enable_grad
         def on_step_end(pipeline, i, t, callback_kwargs):
             
+            on_step_end_start_time = time.perf_counter()  # Record the start time
+                          
+                
             grid_latent = callback_kwargs["latents"]
 
             latents = split_zero123plus_grid(grid_latent, 320 // pipeline.vae_scale_factor)
@@ -728,17 +740,30 @@ class TEXTure:
                 torch.cat((blended_latents[1], blended_latents[4]), dim=3),
                 torch.cat((blended_latents[2], blended_latents[5]), dim=3),
             ), dim=2).half()
+            
+            on_step_end_end_time = time.perf_counter()  # Record the end time
+            elapsed_time = on_step_end_end_time - on_step_end_start_time # Calculate elapsed time
+
+            print(f"Elapsed time in one on_step_end={i}: {elapsed_time} seconds")
+
 
             return callback_kwargs
+        
         #End  def on_step_end(pipeline, i, t, callback_kwargs) 
         # JA: Here we call the Zero123++ pipeline
 
+        zero123_start_time = time.perf_counter()  # Record the end time
         result = self.zero123plus(
             cond_image,
             depth_image=depth_image,
             num_inference_steps=36,
             callback_on_step_end=on_step_end
         ).images[0]
+        
+        zero123_end_time = time.perf_counter()  # Record the end time
+        elapsed_time = zero123_end_time - zero123_start_time # Calculate elapsed time
+
+        print(f"Elapsed time in zero123: {elapsed_time} seconds")
 
       #MJ: Now that the images for the 7 views are generated, project back them to construct the texture atlas
       
