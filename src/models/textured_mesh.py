@@ -603,15 +603,27 @@ class TexturedMeshModel(nn.Module):
         else:
             augmented_vertices = self.mesh.vertices
 
-        if use_median:
+        if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
             diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
                 self.device)).abs().sum(axis=1)
             default_mask = (diff < 0.1).float().unsqueeze(0)
             median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
-                axis=1)
+                axis=1)  #MJ: get the median color of the non-magenta region of texture_img
             texture_img = texture_img.clone()
-            with torch.no_grad():
+            with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
                 texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+                
+        #MJ:  When rendering images, having large patches of a default or placeholder color (like magenta) 
+        #  can be visually jarring and unrealistic. By filling these regions with a median color derived
+        #  from the actual textured parts of the image, the overall appearance becomes more cohesive 
+        #  and aesthetically pleasing. This helps in creating a more seamless and realistic image,
+        #  especially in contexts  where the texture details are crucial, such as in photorealistic rendering.  
+        
+        #==>
+        # Coverage Gaps: Despite the intention to cover the entire texture map with data from various 
+        # viewpoints, gaps can occur. This might be due to occlusions, insufficient viewpoint coverage,
+        # or limitations in the image processing pipeline (e.g., alignment errors or inadequate resolution). 
+        # In such cases,  some regions of the texture map may not receive any data, resulting in default color patches.     
         background_type = 'none'
         use_render_back = False
         if background is not None and type(background) == str: # JA: If background is a string, set it as the type

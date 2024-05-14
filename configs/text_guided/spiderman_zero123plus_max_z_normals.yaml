@@ -7,6 +7,6 @@ guide:
   guidance_scale: 10
   use_zero123plus: True
 optim:
-  #seed: 3
+  seed: 14
   learn_max_z_normals: True
   alpha:               -10
