@@ -86,11 +86,14 @@ def smooth_image(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
     return img
 
 
-def get_nonzero_region(mask: torch.Tensor):
+def get_nonzero_region(mask: torch.Tensor): #MJ: mask: shape = (H,W)
     # Get the indices of the non-zero elements
-    nz_indices = mask.nonzero()
+    nz_indices = mask.nonzero() 
+    #MJ:  nz_indices will have a shape of (N, 2), where N is the number of non-zero elements in mask.
+    # The two columns in nz_indices represent the row index (height) and the column index (width) of each non-zero element, respectively.
     # Get the minimum and maximum indices along each dimension
     min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+    
     min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
 
     # Calculate the size of the square region
@@ -105,6 +108,97 @@ def get_nonzero_region(mask: torch.Tensor):
     max_w = min(mask.shape[1], int(min_w + size))
 
     return min_h, min_w, max_h, max_w
+
+
+def get_nonzero_region_vectorized(mask: torch.Tensor):
+    """
+    Calculate bounding boxes for non-zero regions in each image of a batch, preserving the
+    structure of the original function. Assumes mask has shape (B, 1, H, W).
+    Returns a tensor of shape (B, 4), where each row contains [min_h, min_w, max_h, max_w].
+
+    Parameters:
+    mask (torch.Tensor): The input tensor.
+
+    Returns:
+    torch.Tensor: Bounding boxes for each image in the batch.
+    """
+    B, C, H, W = mask.size()
+    output = torch.zeros((B, 4), dtype=torch.int32)  # Prepare output tensor
+
+    for i in range(B):  # Processing each item in the batch
+        # Flatten the (1, H, W) mask to (H, W) for processing
+        single_mask = mask[i, 0, :, :]
+        nz_indices = single_mask.nonzero()
+
+        if nz_indices.nelement() == 0:  # Check if there are no non-zero entries
+            continue  # Skip to next in batch if no non-zero entries
+
+        # Process non-zero indices as in the original function
+        min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+        min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
+
+        # Calculate the size of the square region
+        size = max(max_h - min_h + 1, max_w - min_w + 1) * 1.1  # Increase size by 10%
+        h_start = min(min_h, max_h) - (size - (max_h - min_h + 1)) / 2
+        w_start = min(min_w, max_w) - (size - (max_w - min_w + 1)) / 2
+
+        # Calculate the bounding box, clamping values within image dimensions
+        min_h = max(0, int(h_start))
+        min_w = max(0, int(w_start))
+        max_h = min(H, int(min_h + size))
+        max_w = min(W, int(min_w + size))
+
+        # Store results in the output tensor
+        output[i, :] = torch.tensor([min_h, min_w, max_h, max_w])
+
+    return output
+
+# Example usage
+# your_mask_tensor = torch.rand(5, 1, 100, 100) > 0.95  # Example tensor for demonstration
+# result = get_nonzero_region_vectorized(your_mask_tensor)
+# print(result)
+
+import torch
+
+def crop_mask_to_bounding_box(mask: torch.Tensor, bounding_boxes: torch.Tensor):
+    """
+    Crop each mask in a batch to the specified bounding box, assuming all channels have the same information.
+    
+    Parameters:
+    mask (torch.Tensor): The input masks tensor with shape (B, C, H, W)
+    bounding_boxes (torch.Tensor): The bounding boxes for each mask with shape (B, 4)
+    
+    Returns:
+    torch.Tensor: The tensor containing cropped masks for each channel identically.
+    """
+    B, C, H, W = mask.shape
+    # Determine the maximum height and width needed to initialize the tensor
+    max_height = max([box[2] - box[0] for box in bounding_boxes])
+    max_width = max([box[3] - box[1] for box in bounding_boxes])
+
+    # Initialize the tensor for cropped masks
+    cropped_masks = torch.zeros((B, C, max_height, max_width), dtype=mask.dtype, device=mask.device)
+    
+    for i in range(B):
+        min_h, min_w, max_h, max_w = bounding_boxes[i]
+        height = max_h - min_h
+        width = max_w - min_w
+        # Apply the same cropping to all channels since the information is repeated
+        cropped_masks[i, :, :height, :width] = mask[i, :, min_h:max_h, min_w:max_w]
+    
+    return cropped_masks
+
+# # Example usage
+# # Suppose outputs["mask"] is a tensor with shape (B, C, H, W)
+# outputs = {
+#     "mask": torch.rand(5, 4, 100, 100) > 0.95  # Example tensor for demonstration, with 4 channels
+# }
+# # Assuming bounding box calculations from one channel, apply to all due to repetition
+# bounding_boxes = get_nonzero_region_vectorized(outputs["mask"][:,0:1,:,:])  # Use any single channel for bounding box calculation
+# cropped_mask = crop_mask_to_bounding_box(outputs["mask"], bounding_boxes)
+
+# print("Cropped Masks Shape:", cropped_mask.shape)
+# print("Bounding Boxes:", bounding_boxes)
 
 
 def gaussian_fn(M, std):
