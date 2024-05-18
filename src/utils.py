@@ -86,7 +86,7 @@ def smooth_image(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
     return img
 
 
-def get_nonzero_region(mask: torch.Tensor): #MJ: mask: shape = (H,W)
+def get_nonzero_region_tuple(mask: torch.Tensor): #MJ: mask: shape = (H,W)
     # Get the indices of the non-zero elements
     nz_indices = mask.nonzero() 
     #MJ:  nz_indices will have a shape of (N, 2), where N is the number of non-zero elements in mask.
@@ -108,7 +108,31 @@ def get_nonzero_region(mask: torch.Tensor): #MJ: mask: shape = (H,W)
     max_w = min(mask.shape[1], int(min_w + size))
 
     return min_h, min_w, max_h, max_w
+    #return torch.tensor([min_h, min_w, max_h, max_w])
 
+def get_nonzero_region_tensor(mask: torch.Tensor): #MJ: mask: shape = (H,W)
+    # Get the indices of the non-zero elements
+    nz_indices = mask.nonzero() 
+    #MJ:  nz_indices will have a shape of (N, 2), where N = 175367 is the number of non-zero elements in mask.
+    # The two columns in nz_indices represent the row index (height) and the column index (width) of each non-zero element, respectively.
+    # Get the minimum and maximum indices along each dimension
+    min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+    
+    min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
+
+    # Calculate the size of the square region
+    size = max(max_h - min_h + 1, max_w - min_w + 1) * 1.1
+    # Calculate the upper left corner of the square region
+    h_start = min(min_h, max_h) - (size - (max_h - min_h + 1)) / 2
+    w_start = min(min_w, max_w) - (size - (max_w - min_w + 1)) / 2
+
+    min_h = max(0, int(h_start))
+    min_w = max(0, int(w_start))
+    max_h = min(mask.shape[0], int(min_h + size))
+    max_w = min(mask.shape[1], int(min_w + size))
+
+    #return min_h, min_w, max_h, max_w
+    return torch.tensor([min_h, min_w, max_h, max_w])
 
 def get_nonzero_region_vectorized(mask: torch.Tensor):
     """
@@ -160,33 +184,36 @@ def get_nonzero_region_vectorized(mask: torch.Tensor):
 
 import torch
 
-def crop_mask_to_bounding_box(mask: torch.Tensor, bounding_boxes: torch.Tensor):
+def crop_img_to_bounding_box(img: torch.Tensor, bounding_boxes: torch.Tensor):
     """
     Crop each mask in a batch to the specified bounding box, assuming all channels have the same information.
     
     Parameters:
-    mask (torch.Tensor): The input masks tensor with shape (B, C, H, W)
+    image (torch.Tensor): The input image tensor with shape (B, C, H, W)
     bounding_boxes (torch.Tensor): The bounding boxes for each mask with shape (B, 4)
     
     Returns:
     torch.Tensor: The tensor containing cropped masks for each channel identically.
     """
-    B, C, H, W = mask.shape
+    B, C, H, W = img.shape
     # Determine the maximum height and width needed to initialize the tensor
     max_height = max([box[2] - box[0] for box in bounding_boxes])
     max_width = max([box[3] - box[1] for box in bounding_boxes])
 
-    # Initialize the tensor for cropped masks
-    cropped_masks = torch.zeros((B, C, max_height, max_width), dtype=mask.dtype, device=mask.device)
+    # Initialize the tensor for cropped masks: backround should be set to 1
+    cropped_imgs = torch.ones((B, C, max_height, max_width), dtype=img.dtype, device=img.device)
     
     for i in range(B):
         min_h, min_w, max_h, max_w = bounding_boxes[i]
         height = max_h - min_h
         width = max_w - min_w
         # Apply the same cropping to all channels since the information is repeated
-        cropped_masks[i, :, :height, :width] = mask[i, :, min_h:max_h, min_w:max_w]
+        cropped_imgs[i, :, :height, :width] = img[i, :, min_h:max_h, min_w:max_w]
     
-    return cropped_masks
+    return cropped_imgs
+
+#crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
+# cropped_rgb_render = crop(outputs['image'])
 
 # # Example usage
 # # Suppose outputs["mask"] is a tensor with shape (B, C, H, W)
