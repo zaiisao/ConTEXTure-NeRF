@@ -78,6 +78,9 @@ def seed_everything(seed):
     torch.cuda.manual_seed(seed)
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = True
+    
+    # Mixing random number generation from NumPy (numpy.random.normal()) and PyTorch (torch.randn_like(gt_latent)) in the same program involves using two separate random number generators,
+    # each with its own state, behavior, and initialization methods.
 
 
 def smooth_image(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -276,10 +279,11 @@ def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
     
     return padded_tensor
 
-def split_zero123plus_grid(grid_image, tile_size):
+def split_zero123plus_grid( grid_image_3x2, tile_size):
     images = []
     for row in range(3):
         images_col = []
+        #MJ: create two columns for each row
         for col in range(2):
             # Calculate the start and end indices for the slices
             start_row = row * tile_size
@@ -288,10 +292,10 @@ def split_zero123plus_grid(grid_image, tile_size):
             end_col = start_col + tile_size
 
             # Slice the tensor and add to the list
-            if len(grid_image.shape) == 3:
-                original_image = grid_image[:, start_row:end_row, start_col:end_col]
-            elif len(grid_image.shape) == 4:
-                original_image = grid_image[:, :, start_row:end_row, start_col:end_col]
+            if len(grid_image_3x2.shape) == 3:
+                original_image = grid_image_3x2[:, start_row:end_row, start_col:end_col]
+            elif len(grid_image_3x2.shape) == 4:
+                original_image = grid_image_3x2[:, :, start_row:end_row, start_col:end_col]
             else:
                 raise NotImplementedError
 
@@ -300,3 +304,51 @@ def split_zero123plus_grid(grid_image, tile_size):
         images.append(images_col)
 
     return images
+
+
+def merge_tensor_with_6_elements_to_3x2_grid(components, tile_size): #MJ: grid_image: (1,4,120,80);components: shape=(6,4,40,40)
+    num_rows = 3
+    num_cols = 2
+    C = components.shape[1]
+    
+    grid_image = torch.empty(1,C, num_rows*components.shape[2],  num_cols*components.shape[3] )
+    for col in range( num_cols):
+        #MJ: images_col = []
+        for row in range(num_rows):
+            # Calculate the start and end indices for the slices
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+            idx =  num_rows * col + row
+            grid_image[0,:, start_row:end_row, start_col:end_col] = components[  idx ]  
+           
+            #MJ: images: col0: img0, img1, img2
+            #            col1: img3, img4, img5
+
+    return  grid_image.to(components.device) #MJ: convert the list to the tensor along the first dim
+
+def split_3x2_grid_to_tensor_with_6_elements(grid_image, tile_size): #MJ: grid_image: (1,4,120,80); tile_size of component
+    num_rows = grid_image.shape[2] // tile_size
+    num_cols =  grid_image.shape[3] // tile_size
+    ## Initialize components tensor to hold the tiles; dimensions [number of tiles, channels, tile_size, tile_size]=[6,4,40,40]
+    components = torch.empty( num_rows * num_cols, grid_image.shape[1], tile_size, tile_size )
+   
+    for col in range(num_cols):
+        #MJ: images_col = []
+        for row in range(num_rows):
+            # Calculate the start and end indices for the tiles
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+           # Assign the tiled grid image to the corresponding position in components:  v = 3 * col + row; 3 = num_of_rows
+            idx =  num_rows * col + row #MJ:   (3 x 2 matrix)  components[ idx ].shape:torch.Size([4, 40, 40])
+            components[ idx ] = grid_image[0,:, start_row:end_row, start_col:end_col]
+           
+            #MJ: images: col0: img0, img1, img2
+            #            col1: img3, img4, img5
+
+    return  components.to(grid_image.device) 

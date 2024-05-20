@@ -223,8 +223,9 @@ class StableDiffusion(nn.Module):
         # Tokenize text and get embeddings
         text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
                                     truncation=True, return_tensors='pt')
-        logger.info(prompt)
-        logger.info(text_input.input_ids)
+        #MJ:
+        # logger.info(prompt)
+        # logger.info(text_input.input_ids)
 
         with torch.no_grad():
             text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]

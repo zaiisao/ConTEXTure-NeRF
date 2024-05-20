@@ -637,7 +637,8 @@ class TexturedMeshModel(nn.Module):
             augmented_vertices[None].repeat(batch_size, 1, 1),
             self.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.face_attributes.repeat(batch_size, 1, 1, 1),
-            texture_img.repeat(batch_size, 1, 1, 1),
+           #MJ :texture_img.repeat(batch_size, 1, 1, 1),
+            texture_img.expand(batch_size, -1, -1, -1), #MJ: Note the use of -1 in .expand(), which tells PyTorch to keep the size of those dimensions as is (3, 1024, and 1024, respectively).
             elev=theta,
             azim=phi,
             radius=radius,
@@ -646,6 +647,21 @@ class TexturedMeshModel(nn.Module):
             dims=dims,
             background_type=background_type
         )
+        
+        #   texture_img.repeat(batch_size, 1, 1, 1),: When you use the repeat method in PyTorch, such as texture_img.repeat(batch_size, 1, 1, 1), 
+        # it does indeed create separate copies of texture_img in the resulting tensor, but these copies are
+        # not independent in terms of gradient computation.
+        # Gradients: Although repeat creates what seems like separate copies of the data for forward computation,
+        # all these copies still reference back to the original texture_img tensor when it comes to computing gradients.
+        # If a gradient is computed with respect to the repeated tensor during backpropagation, 
+        # it will aggregate (sum) the gradients from all copies back into the original texture_img.
+        # This means that the gradient of each parameter in texture_img will be the sum of the gradients
+        # computed across all batch instances where it was used.
+        
+        # Using .expand() is particularly useful in models where a parameter tensor (like weights, biases,
+        # or a specific feature map) needs to be applied identically across multiple instances 
+        # or positions without creating multiple independent copies, thus saving memory and computational resources.
+        
 
         mask = mask.detach()
 
