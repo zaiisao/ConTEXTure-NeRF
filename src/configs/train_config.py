@@ -52,6 +52,8 @@ class GuideConfig:
     guidance_scale_i: Optional[int] = None
     guidance_scale_t: Optional[int] = None
 
+    use_zero123plus: Optional[bool] = True
+
     guess_mode: Optional[bool] = False
     # Scale of mesh in 1x1x1 cube
     shape_scale: float = 0.6
@@ -93,6 +95,8 @@ class OptimConfig:
     # For Diffusion model
     no_noise: bool = False
 
+    #MJ: added by MJ
+    learn_max_z_normals: bool = True
 
 @dataclass
 class LogConfig:

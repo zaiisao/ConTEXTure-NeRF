@@ -43,6 +43,13 @@ def get_view_direction(thetas, phis, overhead, front):
 def tensor2numpy(tensor: torch.Tensor) -> np.ndarray:
     tensor = tensor.detach().cpu().numpy()
     tensor = (tensor * 255).astype(np.uint8)
+    #MJ: This line is syntactically correct for converting a tensor to a numpy array,
+    # scaling its values by 255, and then converting it to an 8-bit unsigned integer format.
+    # If it causes:  RuntimeWarning: invalid value encountered in cast
+    # tensor = (tensor * 255).astype(np.uint8):
+    #The warning often occurs when attempting to convert NaNs or infinities to integers,
+    # as these values do not have direct integer representations.
+    
     return tensor
 
 
@@ -120,3 +127,47 @@ def color_with_shade(color: List[float], z_normals: torch.Tensor, light_coef=0.7
     shaded_color = torch.tensor(color).view(1, 3, 1, 1).to(
         z_normals.device) * normals_with_light
     return shaded_color
+
+def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
+    # Get the current dimensions of the tensor
+    current_height, current_width = input_tensor.shape[-2], input_tensor.shape[-1]
+    
+    # Calculate padding needed
+    pad_height = target_height - current_height
+    pad_width = target_width - current_width
+
+    # Calculate padding for top/bottom and left/right
+    pad_top = pad_height // 2
+    pad_bottom = pad_height - pad_top
+    pad_left = pad_width // 2
+    pad_right = pad_width - pad_left
+
+    # Apply the padding
+    padded_tensor = F.pad(input_tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=value)
+    
+    return padded_tensor
+
+def split_zero123plus_grid(grid_image, tile_size):
+    images = []
+    for row in range(3):
+        images_col = []
+        for col in range(2):
+            # Calculate the start and end indices for the slices
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+            # Slice the tensor and add to the list
+            if len(grid_image.shape) == 3:
+                original_image = grid_image[:, start_row:end_row, start_col:end_col]
+            elif len(grid_image.shape) == 4:
+                original_image = grid_image[:, :, start_row:end_row, start_col:end_col]
+            else:
+                raise NotImplementedError
+
+            images_col.append(original_image)
+
+        images.append(images_col)
+
+    return images

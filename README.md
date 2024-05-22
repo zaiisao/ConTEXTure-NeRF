@@ -172,3 +172,22 @@ maps, with the actual colors in `reference_texture` guiding the editing process.
 ```bash
 python -m scripts.run_texture --config_path=configs/texture_edit/scribble_on_bunny.yaml
 ```
+
+
+THIS IS THE installation procedure that works for our machine:
+I am installing TextureWithZero123 repo in the new server.
+ I will do the following in sequence. Check if this is the same as you did in the new server. Tell me if I miss anything.
+conda create -n Moon-TextureWithZero123 python=3.9  (??)
+conda activate Moon-TextureWithZero123
+git clone https://github.com/moonryul/TEXTureWithZero123.git
+pip install -r src/zero123/zero123/requirements.txt
+and
+pip install -r requirements.txt
+pip uninstall torch torchvision
+5. conda install pytorch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+6. pip install kaolin==0.15.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.1_cu121.html
+7. diffusers == 0.20.0
+git clone https://github.com/CompVis/taming-transformers.git
+pip install -e taming-transformers/
+git clone https://github.com/openai/CLIP.git
+pip install -e CLIP/ 

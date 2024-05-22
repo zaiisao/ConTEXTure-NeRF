@@ -55,11 +55,11 @@ class Mesh:
 
         verts = mesh.vertices
         center = verts.mean(dim=0)
-        verts = verts - center
-        scale = torch.max(torch.norm(verts, p=2, dim=1))
-        verts = verts / scale
-        verts *= target_scale
-        verts[:, 1] += dy
+        verts = verts - center # JA: reposition vertices with respect to the center
+        scale = torch.max(torch.norm(verts, p=2, dim=1)) # JA: scale is the length of the furthest vertex from the center
+        verts = verts / scale # JA: normalize vertices relative to the largest coordinates. The normalized vertices range from [-1, 1]
+        verts *= target_scale # JA: x, y, z: [-1, 1] -> [-0.6, 0.6]
+        verts[:, 1] += dy # JA: y: [-0.6, 0.6] -> [-0.35, 0.85]
         mesh.vertices = verts
         return mesh
 

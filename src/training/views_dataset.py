@@ -85,6 +85,69 @@ def circle_poses(device, radius=1.25, theta=60.0, phi=0.0, angle_overhead=30.0, 
     return dirs, thetas.item(), phis.item(), radius
 
 
+class Zero123PlusDataset:
+    def __init__(self, cfg: RenderConfig, device):
+        super().__init__()
+
+        self.cfg = cfg
+        self.device = device
+        self.type = type  # train, val, tests
+
+        # JA: phi=0 refers to the front azimuth angle for cond image.
+        # The remaining six azimuth angles are for the target image.
+        self.phis = [0] + [30, 150, 270, 90,  210, 330] # JA: These are the relative azimuth angles of the six target
+                                                        # views relative to the zero123++ paper
+
+        # JA: In Zero123++, the thetas (elevation) are absolute angles, unlike the azimuth angles.
+        # From the paper, we know that the elevation angles for the target images are absolute angles, 30 and -20
+        # (refer to Figure 2 of Zero123++ paper). 
+
+        # self.thetas = [self.cfg.base_theta] + ([self.cfg.base_theta - 30] * 3) + ([self.cfg.base_theta + 20] * 3)
+        self.thetas = [30] + [30, 30, 30, -20, -20, -20]    # JA: These are the absolute elevation angles of the six
+                                                            # target views relative to the zero123++ paper. The first
+                                                            # theta, 60, is the front view elevation angle.
+
+        #(theta, phi) in TEXTure = (90 - 30, 30), (90 - 30, 150), (90 - 30, 270), (90 - (-20), 90), (90 - (-20), 210), (90 - (-20), 330)
+        #                           (30, 0), (30, 30), (30, 150), (30, 270), (80, 90), (80, 210), (80, 330)
+
+        # JA: In Zero123++, the elevation angle is measured from the horizontal axis, that is, 90 degrees from the
+        # vertical axis. But in TEXTure, the elevation angle is measured from the vertical axis, as in the Wikipedia
+        # standard: https://en.wikipedia.org/wiki/Spherical_coordinate_system
+        self.thetas = [90 - theta for theta in self.thetas]
+
+        self.size = len(self.phis)
+
+    def collate(self, index):
+
+        # B = len(index)  # always 1
+
+        # phi = (index[0] / self.size) * 360
+        phi = self.phis[index[0]]
+        theta = self.thetas[index[0]]
+        radius = self.cfg.radius
+        dirs, thetas, phis, radius = circle_poses(self.device, radius=radius, theta=theta,
+                                                  phi=phi,
+                                                  angle_overhead=self.cfg.overhead_range,
+                                                  angle_front=self.cfg.front_range)
+
+        base_theta = math.radians(self.cfg.base_theta)
+
+        data = {
+            'dir': dirs,
+            'theta': thetas,
+            'phi': phis,
+            'radius': radius,
+            'base_theta': base_theta
+        }
+
+        return data
+
+    def dataloader(self):
+        loader = DataLoader(list(range(self.size)), batch_size=1, collate_fn=self.collate, shuffle=False,
+                            num_workers=0)
+        loader._data = self  # an ugly fix... we need to access dataset in trainer.
+        return loader    
+
 class MultiviewDataset:
     def __init__(self, cfg: RenderConfig, device):
         super().__init__()
@@ -101,8 +164,8 @@ class MultiviewDataset:
         alternate_lists = lambda l: [l[0]] + [i for j in zip(l[1:size // 2], l[-1:size // 2:-1]) for i in j] + [
             l[size // 2]]
         if self.cfg.alternate_views:
-            self.phis = alternate_lists(self.phis)
-            self.thetas = alternate_lists(self.thetas)
+            self.phis = alternate_lists(self.phis)       # JA: [0,  45, -45, 90, -90, 135, -135, 180]
+            self.thetas = alternate_lists(self.thetas)   # JA: [60, 60,  60, 60,  60,  60,   60, 60]
         logger.info(f'phis: {self.phis}')
         # self.phis = self.phis[1:2]
         # self.thetas = self.thetas[1:2]
@@ -112,16 +175,16 @@ class MultiviewDataset:
         #     self.phis =[180,180]+self.phis
         #     self.thetas = [30,150]+self.thetas
 
-        for phi, theta in self.cfg.views_before:
+        for phi, theta in self.cfg.views_before:    # JA: By default, there are no angles in views_before
             self.phis = [phi] + self.phis
             self.thetas = [theta] + self.thetas
-        for phi, theta in self.cfg.views_after:
+        for phi, theta in self.cfg.views_after:     # JA: [180, 30], [180, 150] are added to the list of angles
             self.phis = self.phis + [phi]
             self.thetas = self.thetas + [theta]
             # self.phis = [0, 0] + self.phis
             # self.thetas = [20, 160] + self.thetas
 
-        self.size = len(self.phis)
+        self.size = len(self.phis) # JA: Using default settings, size is 10
 
     def collate(self, index):
 
