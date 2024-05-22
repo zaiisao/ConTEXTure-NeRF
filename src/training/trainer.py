@@ -367,7 +367,11 @@ class TEXTure:
                                                     use_meta_texture=True, render_cache=None)
             z_normals = meta_outputs["normals"][:,2:3,:,:].clamp(0, 1)
             max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1) 
+            #MJ: max_z_normals refers to the projection of self.meta_texture_img, which is a leaf tensor (parameter tensor)
             self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
+            #self.view_weights is a function of self.meta_texture_img; When self.view_weights is used to compute a loss
+            # self.view_weights.detach() should be used to avoid an error of re-using the freed computational graph
+            
             #MJ: try to vary alpha from -1 to -10: If alpha approaches -10, 
             # the face_idx whose z_normals are greater have more weights
     
@@ -1347,17 +1351,23 @@ class TEXTure:
         phi = float(phi + 2 * np.pi if phi < 0 else phi)
         dim = self.cfg.render.eval_grid_size
         
+        #Now, self.texture_img has been learned fully (when we call eval_render even when self.texture_img is partially learned)
         outputs = self.mesh_model.render(theta=theta, phi=phi, radius=radius,
                                          dims=(dim, dim), background='white')
         
+        
         z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
         rgb_render = outputs['image']  # .permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+        
+        rgb_render.register_hook(self.print_hook) #MJ: for debugging with loss.backward(retrain_graph=True)
+        
         diff = (rgb_render.detach() - torch.tensor(self.mesh_model.default_color).view(1, 3, 1, 1).to(
             self.device)).abs().sum(axis=1)
         uncolored_mask = (diff < 0.1).float().unsqueeze(0)
         rgb_render = rgb_render * (1 - uncolored_mask) + utils.color_with_shade([0.85, 0.85, 0.85], z_normals=z_normals,
                                                                                 light_coef=0.3) * uncolored_mask
-
+        #MJ: If part of self.texture_img is not learned (still with the default magenta color), fill that with the median color of
+        # the learned part
         outputs_with_median = self.mesh_model.render(theta=theta, phi=phi, radius=radius,
                                                      dims=(dim, dim), use_median=True,
                                                      render_cache=outputs['render_cache'])
@@ -1539,9 +1549,14 @@ class TEXTure:
         # of the texture atlas.
         # losses = []
         with  tqdm(range(200), desc='project_back (SD2): fitting mesh colors for the front view') as pbar:
-          for i in pbar:  
-            optimizer.zero_grad()
-            outputs = self.mesh_model.render(background=background,
+          for i in pbar:  #MJ: Here we do not have the batch loop, but only the epoch loop
+            optimizer.zero_grad() #MJ: This effectively resets the gradients before each backward pass;
+            #  it resets these .grad attributes to zero for all parameters before the backward pass.
+            #   preventing them from accumulating across iterations. 
+            #   this avoids the accumulation of the gradients (which is the default behavior)
+            #MJ: In PyTorch, gradients accumulate by default. When you call backward() multiple times, 
+            # the gradients are added to the existing gradients in the x.grad attribute unless you manually zero them out.
+            outputs = self.mesh_model.render(background=background, #MJ:  render_caches contains the info about all viewpoint projection and rasterization data
                                              render_cache=render_cache)
             rgb_render = outputs['image']
 
@@ -1572,6 +1587,8 @@ class TEXTure:
             
             
             pbar.set_description(f"project_back (SD2): Fitting mesh colors -Epoch {i + 1}, Loss: {loss.item():.7f}")
+            #MJ:    # Backward pass (accumulate gradients): cf: ChatGPT: https://chatgpt.com/share/12b5eaf3-eb97-425f-9142-78603e682683
+            #  the gradient of the loss over a large batch is the sum of the gradients of the losses over the mini-batches.
             loss.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
                             # the network, that is, the pixel value of the texture atlas
             optimizer.step()
@@ -1585,14 +1602,29 @@ class TEXTure:
     #         object_mask=object_mask, update_mask=object_mask, z_normals=z_normals, z_normals_cache=z_normals_cache,
     #         weight_masks=self.weight_masks
     #     )
-            
+    
+     
+    def print_hook(self, grad):
+           print(f"Gradient: {grad}")  
+                 
     def project_back_only_texture_atlas(self, render_cache: Dict[str, Any], background: Any, rgb_output: torch.Tensor,
                      object_mask: torch.Tensor, update_mask: torch.Tensor, z_normals: torch.Tensor,
                       z_normals_cache: torch.Tensor                   
                      ):
         eroded_masks = []
+        
+        #object_mask = object_mask.detach()
+        #object_mask is a part of the computational graph self.mesh_model.render()
+        #This computational graph will be freed after loss.backward() in the training loop later.
+        #MJ: render_update_mask used within the training loop may be freed because it is also a part of the computional graph of loss
+        #Then, when render_update_mask is used at the second iteration of the loop, it will be no longer available.
+        #Detaching object_mask from the computational graph will avoid the problem.
+        
         for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
-            eroded_mask = cv2.erode(object_mask[i, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))
+            eroded_mask = cv2.erode(object_mask[i, 0].cpu().numpy(), np.ones((5, 5), np.uint8))
+            #tensor.cpu(): Moves the tensor to the CPU. This does not affect the computational graph that the tensor is part of.
+            
+            #eroded_mask = cv2.erode(object_mask[i, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))
             eroded_masks.append(torch.from_numpy(eroded_mask).to(self.device).unsqueeze(0).unsqueeze(0))
 
         # Convert the list of tensors to a single tensor
@@ -1602,7 +1634,8 @@ class TEXTure:
 
         dilated_masks = []
         for i in range(object_mask.shape[0]):  # Iterate over the batch dimension
-            dilated_mask = cv2.dilate(render_update_mask[i, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))
+            dilated_mask = cv2.dilate(render_update_mask[i, 0].cpu().numpy(), np.ones((25, 25), np.uint8))
+            #dilated_mask = cv2.dilate(render_update_mask[i, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))
             dilated_masks.append(torch.from_numpy(dilated_mask).to(self.device).unsqueeze(0).unsqueeze(0))
 
         # Convert the list of tensors to a single tensor
@@ -1622,6 +1655,7 @@ class TEXTure:
            
         optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
                                      eps=1e-15)
+        
             
         # JA: Create the texture atlas for the mesh using each view. It updates the parameters
         # of the neural network and the parameters are the pixel values of the texture atlas.
@@ -1634,34 +1668,101 @@ class TEXTure:
         with tqdm(range(200), desc='project_back_only_texture_atla: fitting mesh colors') as pbar:
             for iter in pbar:
                 optimizer.zero_grad()
+                
                 outputs = self.mesh_model.render(background=background,
                                                 render_cache=render_cache)  
-                #MJ: with render_cache not None => render() omits the raterization process, uses the cache of its results
+                #MJ: with render_cache given (not None) => render() omits the raterization process,
+                # uses the cache of the info about the projection and rasteriation of all viewpoints.
                 #  and only performs the texture mapping projection => take much less time than performing a full rendering 
                                                    
                 rgb_render = outputs['image']
+                # # Debugging: Check the grad_fn attribute
+                # print(f"Iteration {iter}: rgb_render.grad_fn: {rgb_render.grad_fn}")
+
+                #rgb_render.register_hook(self.print_hook)
                 
                 # for i in range(rgb_render.shape[0]):
                 #     self.log_train_image(rgb_render[i][None] * render_update_mask[i][None], f'project_back: rgb-output_{i}')  
            
-                #MJ: z_normals = outputs['normal'][:,-1,:,:]
-
-                # loss = (render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                #loss = (render_update_mask * z_normals * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                #BY MJ:
-                #MJ: Try the following three weight_masks
-                #1) weight_masks computed by compare_between_views
-                #2) use weight-masks based on z_normals
-                # weight_masks = self.compute_view_weights( z_normals )
-                #3) use weight-masks as best_z_normals
+               
+                #MJ:  By calling detach(), you prevent gradients from flowing back into self.view_weights
+                #  from this particular loss computation. This means self.view_weights can 
+                #  still be updated elsewhere in your model or training procedure without causing conflicts 
+                #  or retaining unnecessary parts of the graph in this function.
                 
-                #MJ: loss = (render_update_mask * weight_masks * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                loss = (render_update_mask * self.view_weights * (rgb_render - rgb_output.detach()).pow(2)).mean()
-                loss.backward(retain_graph=True) # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
-                                # the network, that is, the pixel value of the texture atlas
-                                #MJ:  if the loss is now dependent on some stateful or iterative operation, it might need to retain the graph.
-              
-                #loss.backward()
+                #  Using detach() makes the operation treat self.view_weights as a constant rather than
+                #  a variable needing gradient updates in this context. This prevents errors related to
+                #  trying to backpropagate through parts of the graph
+                #  that have already completed their updates and had their intermediate states discarded.
+                loss = (render_update_mask * self.view_weights.detach() * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                #Using self.view_weights in the loss requires retrain_graph = True in loss.backward()
+                #loss = ( render_update_mask * (rgb_render - rgb_output.detach()).pow(2)).mean()
+                
+                # # Debugging: Check the grad_fn attribute
+                # print(f"Iteration {iter}: loss.grad_fn: {loss.grad_fn}")
+                
+                #loss.backward(retain_graph=True) # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
+                # the network, that is, the pixel value of the texture atlas
+                try:
+                    loss.backward()
+                    #print("Backward pass completed")
+                                     
+                    #MJ: Computational Graph Dynamics: Each time you compute the loss and call loss.backward(),
+                    # a new computational graph is created just for that computation. This graph is specific 
+                    # to the operations that compute the loss for that particular iteration, 
+                    # involving the current parameters and the data processed in that loop. 
+                    # Once .backward() is executed, this graph is discarded (unless retain_graph=True),
+                    # but the parameters themselves retain the updates applied by the optimizer.step() method.
+                    
+                    #MJ: Computational Graph and rgb_render: When loss.backward() is called,
+                    # the gradients are computed by backpropagating through the computational graph 
+                    # that was used to compute the loss. This graph includes all operations that
+                    # produced rgb_render and any tensors derived from it that were used to calculate the loss.
+
+                    # Memory Management: After the backward pass (loss.backward()), PyTorch typically frees up
+                    # the memory associated with the intermediate tensors in the computational graph to
+                    # save space, since these tensors (and their gradients) are no longer needed.
+                    # This includes the memory for any operations and intermediate results leading up 
+                    # to rgb_render. However, rgb_render itself, as a tensor resulting from your model's
+                    # operations (self.mesh_model.render()), is not automatically "discarded" 
+                    # but remains in memory until it goes out of scope or is overwritten.
+                    
+                    #Summary: So in your training loop, rgb_render is maintained after loss.backward() 
+                    # unless you explicitly overwrite it or it goes out of scope. 
+                    # However, the computational graph that helped compute it is cleared to free up memory,
+                    # unless you specify otherwise with retain_graph=True.
+                    
+                    #Important Notes:   How loss.backward() Works
+                    # When loss.backward() is called, it computes the gradients for all tensors in the computational graph that 
+                    # have requires_grad=True, regardless of whether they are currently linked to an optimizer or not. 
+                    # This is because the backward pass is solely responsible for computing gradients 
+                    # based on the structure of the computational graph and the operation that produced the loss.
+                    
+                    #Role of the Optimizer:
+                    # The optimizer, such as Adam in your case, is responsible for updating the parameters it knows about
+                    # (those passed during its initialization) based on the gradients computed during the backward pass. 
+                    # If a parameter is not included in the optimizer’s parameter list, it won't be updated by the optimizer,
+                    # even though its gradient might still be computed if it’s part of the computational graph leading to the loss
+                    # Your Scenario:
+                    # Using self.view_weights: If self.view_weights has requires_grad=True and is part of the computation leading
+                    # to loss, then loss.backward() will attempt to compute its gradients. 
+                    # This is true even if self.view_weights is not listed in the optimizer's parameters.# 
+                    
+                    # Detaching self.view_weights: When you call self.view_weights.detach(), 
+                    # you effectively stop loss.backward() from computing gradients for self.view_weights.
+                    # This is because detach() creates a tensor that does not require gradients 
+                    # and is not part of the computational graph.
+                    
+
+                except RuntimeError as e:
+                    print(f"Error during backward pass at iteration {iter}: {e}")
+                    raise
+                #  # Debugging: Check gradients after backward pass
+                # for name, param in self.mesh_model.named_parameters():
+                #     if param.grad is not None:
+                #         print(f"Iteration {iter}: Gradient for {name}: {param.grad.norm()}")
+                        
+       
                 optimizer.step()
                 pbar.set_description(f"zero123plus: Fitting mesh colors -Epoch {iter + 1}, Loss: {loss.item():.7f}")
 
