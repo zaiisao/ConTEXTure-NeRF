@@ -1,0 +1,12 @@
+log:
+  exp_name: astronaut
+guide:
+  text: "astronaut in a sleek space suit, exploring alien worlds"
+  shape_path: texfusion_dataset/Text2Mesh/person.obj
+  guidance_scale: 10
+  use_zero123plus: True
+optim:
+  #seed: 3
+  learn_max_z_normals: True
+render:
+  front_offset: -90

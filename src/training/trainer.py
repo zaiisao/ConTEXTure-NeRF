@@ -450,12 +450,13 @@ class TEXTure:
        
        
         #MJ: prepare the front view image
+        front_image_rgba = torch.cat((front_image, object_mask_front), dim=1)
         min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(object_mask_front[0, 0])
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
-        cropped_front_image = crop(front_image)
+        cropped_front_image_rgba = crop(front_image_rgba)
         
         self.log_train_image(front_image, 'paint_zero123plus:front_image')
-        self.log_train_image(cropped_front_image, 'paint_zero123plus:cropped_front_image')
+        self.log_train_image(cropped_front_image_rgba[:, 0:3], 'paint_zero123plus:cropped_front_image')
 
         # masks = self.outputs['mask']
         # bounding_boxes = utils.get_nonzero_region_vectorized( masks )    
@@ -597,7 +598,7 @@ class TEXTure:
         # size – The requested size in pixels, as a 2-tuple: (width, height).
 
         # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
-        cond_image = torchvision.transforms.functional.to_pil_image(cropped_front_image[0]).resize((320, 320))
+        cond_image = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
         depth_image = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0]).resize((640, 960))
 
         masks_latent_list =[]
