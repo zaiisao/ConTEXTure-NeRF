@@ -42,6 +42,14 @@ def get_view_direction(thetas, phis, overhead, front):
 
 def tensor2numpy(tensor: torch.Tensor) -> np.ndarray:
     tensor = tensor.detach().cpu().numpy()
+    #MJ: added to handle bad pixel values 
+    if np.any(np.isnan(tensor)) or np.any(np.isinf(tensor)):
+    #     # Raise an exception if there are any NaNs or infinite values
+    #      tensor = einops.rearrange(tensor, '(1) c h w -> h w c').detach().cpu().numpy()
+    #      Image.fromarray( (tensor * 255).astype(np.uint8) ).save('experiments'/f'debug:NanOrInf.jpg')
+
+          raise ValueError("Tensor contains NaNs or infinite values, which cannot be converted to np.uint8.")
+
     tensor = (tensor * 255).astype(np.uint8)
     #MJ: This line is syntactically correct for converting a tensor to a numpy array,
     # scaling its values by 255, and then converting it to an 8-bit unsigned integer format.
@@ -70,6 +78,9 @@ def seed_everything(seed):
     torch.cuda.manual_seed(seed)
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = True
+    
+    # Mixing random number generation from NumPy (numpy.random.normal()) and PyTorch (torch.randn_like(gt_latent)) in the same program involves using two separate random number generators,
+    # each with its own state, behavior, and initialization methods.
 
 
 def smooth_image(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -78,11 +89,14 @@ def smooth_image(self, img: torch.Tensor, sigma: float) -> torch.Tensor:
     return img
 
 
-def get_nonzero_region(mask: torch.Tensor):
+def get_nonzero_region_tuple(mask: torch.Tensor): #MJ: mask: shape = (H,W)
     # Get the indices of the non-zero elements
-    nz_indices = mask.nonzero()
+    nz_indices = mask.nonzero() 
+    #MJ:  nz_indices will have a shape of (N, 2), where N is the number of non-zero elements in mask.
+    # The two columns in nz_indices represent the row index (height) and the column index (width) of each non-zero element, respectively.
     # Get the minimum and maximum indices along each dimension
     min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+    
     min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
 
     # Calculate the size of the square region
@@ -97,6 +111,124 @@ def get_nonzero_region(mask: torch.Tensor):
     max_w = min(mask.shape[1], int(min_w + size))
 
     return min_h, min_w, max_h, max_w
+    #return torch.tensor([min_h, min_w, max_h, max_w])
+
+def get_nonzero_region_tensor(mask: torch.Tensor): #MJ: mask: shape = (H,W)
+    # Get the indices of the non-zero elements
+    nz_indices = mask.nonzero() 
+    #MJ:  nz_indices will have a shape of (N, 2), where N = 175367 is the number of non-zero elements in mask.
+    # The two columns in nz_indices represent the row index (height) and the column index (width) of each non-zero element, respectively.
+    # Get the minimum and maximum indices along each dimension
+    min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+    
+    min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
+
+    # Calculate the size of the square region
+    size = max(max_h - min_h + 1, max_w - min_w + 1) * 1.1
+    # Calculate the upper left corner of the square region
+    h_start = min(min_h, max_h) - (size - (max_h - min_h + 1)) / 2
+    w_start = min(min_w, max_w) - (size - (max_w - min_w + 1)) / 2
+
+    min_h = max(0, int(h_start))
+    min_w = max(0, int(w_start))
+    max_h = min(mask.shape[0], int(min_h + size))
+    max_w = min(mask.shape[1], int(min_w + size))
+
+    #return min_h, min_w, max_h, max_w
+    return torch.tensor([min_h, min_w, max_h, max_w])
+
+def get_nonzero_region_vectorized(mask: torch.Tensor):
+    """
+    Calculate bounding boxes for non-zero regions in each image of a batch, preserving the
+    structure of the original function. Assumes mask has shape (B, 1, H, W).
+    Returns a tensor of shape (B, 4), where each row contains [min_h, min_w, max_h, max_w].
+
+    Parameters:
+    mask (torch.Tensor): The input tensor.
+
+    Returns:
+    torch.Tensor: Bounding boxes for each image in the batch.
+    """
+    B, C, H, W = mask.size()
+    output = torch.zeros((B, 4), dtype=torch.int32)  # Prepare output tensor
+
+    for i in range(B):  # Processing each item in the batch
+        # Flatten the (1, H, W) mask to (H, W) for processing
+        single_mask = mask[i, 0, :, :]
+        nz_indices = single_mask.nonzero()
+
+        if nz_indices.nelement() == 0:  # Check if there are no non-zero entries
+            continue  # Skip to next in batch if no non-zero entries
+
+        # Process non-zero indices as in the original function
+        min_h, max_h = nz_indices[:, 0].min(), nz_indices[:, 0].max()
+        min_w, max_w = nz_indices[:, 1].min(), nz_indices[:, 1].max()
+
+        # Calculate the size of the square region
+        size = max(max_h - min_h + 1, max_w - min_w + 1) * 1.1  # Increase size by 10%
+        h_start = min(min_h, max_h) - (size - (max_h - min_h + 1)) / 2
+        w_start = min(min_w, max_w) - (size - (max_w - min_w + 1)) / 2
+
+        # Calculate the bounding box, clamping values within image dimensions
+        min_h = max(0, int(h_start))
+        min_w = max(0, int(w_start))
+        max_h = min(H, int(min_h + size))
+        max_w = min(W, int(min_w + size))
+
+        # Store results in the output tensor
+        output[i, :] = torch.tensor([min_h, min_w, max_h, max_w])
+
+    return output
+
+# Example usage
+# your_mask_tensor = torch.rand(5, 1, 100, 100) > 0.95  # Example tensor for demonstration
+# result = get_nonzero_region_vectorized(your_mask_tensor)
+# print(result)
+
+import torch
+
+def crop_img_to_bounding_box(img: torch.Tensor, bounding_boxes: torch.Tensor):
+    """
+    Crop each mask in a batch to the specified bounding box, assuming all channels have the same information.
+    
+    Parameters:
+    image (torch.Tensor): The input image tensor with shape (B, C, H, W)
+    bounding_boxes (torch.Tensor): The bounding boxes for each mask with shape (B, 4)
+    
+    Returns:
+    torch.Tensor: The tensor containing cropped masks for each channel identically.
+    """
+    B, C, H, W = img.shape
+    # Determine the maximum height and width needed to initialize the tensor
+    max_height = max([box[2] - box[0] for box in bounding_boxes])
+    max_width = max([box[3] - box[1] for box in bounding_boxes])
+
+    # Initialize the tensor for cropped masks: backround should be set to 1
+    cropped_imgs = torch.ones((B, C, max_height, max_width), dtype=img.dtype, device=img.device)
+    
+    for i in range(B):
+        min_h, min_w, max_h, max_w = bounding_boxes[i]
+        height = max_h - min_h
+        width = max_w - min_w
+        # Apply the same cropping to all channels since the information is repeated
+        cropped_imgs[i, :, :height, :width] = img[i, :, min_h:max_h, min_w:max_w]
+    
+    return cropped_imgs
+
+#crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
+# cropped_rgb_render = crop(outputs['image'])
+
+# # Example usage
+# # Suppose outputs["mask"] is a tensor with shape (B, C, H, W)
+# outputs = {
+#     "mask": torch.rand(5, 4, 100, 100) > 0.95  # Example tensor for demonstration, with 4 channels
+# }
+# # Assuming bounding box calculations from one channel, apply to all due to repetition
+# bounding_boxes = get_nonzero_region_vectorized(outputs["mask"][:,0:1,:,:])  # Use any single channel for bounding box calculation
+# cropped_mask = crop_mask_to_bounding_box(outputs["mask"], bounding_boxes)
+
+# print("Cropped Masks Shape:", cropped_mask.shape)
+# print("Bounding Boxes:", bounding_boxes)
 
 
 def gaussian_fn(M, std):
@@ -147,10 +279,11 @@ def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
     
     return padded_tensor
 
-def split_zero123plus_grid(grid_image, tile_size):
+def split_zero123plus_grid( grid_image_3x2, tile_size):
     images = []
     for row in range(3):
         images_col = []
+        #MJ: create two columns for each row
         for col in range(2):
             # Calculate the start and end indices for the slices
             start_row = row * tile_size
@@ -159,10 +292,10 @@ def split_zero123plus_grid(grid_image, tile_size):
             end_col = start_col + tile_size
 
             # Slice the tensor and add to the list
-            if len(grid_image.shape) == 3:
-                original_image = grid_image[:, start_row:end_row, start_col:end_col]
-            elif len(grid_image.shape) == 4:
-                original_image = grid_image[:, :, start_row:end_row, start_col:end_col]
+            if len(grid_image_3x2.shape) == 3:
+                original_image = grid_image_3x2[:, start_row:end_row, start_col:end_col]
+            elif len(grid_image_3x2.shape) == 4:
+                original_image = grid_image_3x2[:, :, start_row:end_row, start_col:end_col]
             else:
                 raise NotImplementedError
 
@@ -171,3 +304,51 @@ def split_zero123plus_grid(grid_image, tile_size):
         images.append(images_col)
 
     return images
+
+
+def merge_tensor_with_6_elements_to_3x2_grid(components, tile_size): #MJ: grid_image: (1,4,120,80);components: shape=(6,4,40,40)
+    num_rows = 3
+    num_cols = 2
+    C = components.shape[1]
+    
+    grid_image = torch.empty(1,C, num_rows*components.shape[2],  num_cols*components.shape[3] )
+    for col in range( num_cols):
+        #MJ: images_col = []
+        for row in range(num_rows):
+            # Calculate the start and end indices for the slices
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+            idx =  num_rows * col + row
+            grid_image[0,:, start_row:end_row, start_col:end_col] = components[  idx ]  
+           
+            #MJ: images: col0: img0, img1, img2
+            #            col1: img3, img4, img5
+
+    return  grid_image.to(components.device) #MJ: convert the list to the tensor along the first dim
+
+def split_3x2_grid_to_tensor_with_6_elements(grid_image, tile_size): #MJ: grid_image: (1,4,120,80); tile_size of component
+    num_rows = grid_image.shape[2] // tile_size
+    num_cols =  grid_image.shape[3] // tile_size
+    ## Initialize components tensor to hold the tiles; dimensions [number of tiles, channels, tile_size, tile_size]=[6,4,40,40]
+    components = torch.empty( num_rows * num_cols, grid_image.shape[1], tile_size, tile_size )
+   
+    for col in range(num_cols):
+        #MJ: images_col = []
+        for row in range(num_rows):
+            # Calculate the start and end indices for the tiles
+            start_row = row * tile_size
+            end_row = start_row + tile_size
+            start_col = col * tile_size
+            end_col = start_col + tile_size
+
+           # Assign the tiled grid image to the corresponding position in components:  v = 3 * col + row; 3 = num_of_rows
+            idx =  num_rows * col + row #MJ:   (3 x 2 matrix)  components[ idx ].shape:torch.Size([4, 40, 40])
+            components[ idx ] = grid_image[0,:, start_row:end_row, start_col:end_col]
+           
+            #MJ: images: col0: img0, img1, img2
+            #            col1: img3, img4, img5
+
+    return  components.to(grid_image.device) 

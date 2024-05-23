@@ -1,9 +1,11 @@
 log:
   exp_name: napoleon_0123plus_use_learned_max_z_normals
 guide:
-  text: "A photo of Napoleon Bonaparte, {} view"
+  text: "A photo of Napoleon Bonaparte, real person, not a sculpture, {} view"
   append_direction: True
   shape_path: shapes/napoleon.obj
   use_zero123plus: True
 optim:
-  seed: 3
+  seed: 0
+  learn_max_z_normals: True
+  alpha:               -10

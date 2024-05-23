@@ -603,15 +603,27 @@ class TexturedMeshModel(nn.Module):
         else:
             augmented_vertices = self.mesh.vertices
 
-        if use_median:
+        if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
             diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
                 self.device)).abs().sum(axis=1)
             default_mask = (diff < 0.1).float().unsqueeze(0)
             median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
-                axis=1)
+                axis=1)  #MJ: get the median color of the non-magenta region of texture_img
             texture_img = texture_img.clone()
-            with torch.no_grad():
+            with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
                 texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+                
+        #MJ:  When rendering images, having large patches of a default or placeholder color (like magenta) 
+        #  can be visually jarring and unrealistic. By filling these regions with a median color derived
+        #  from the actual textured parts of the image, the overall appearance becomes more cohesive 
+        #  and aesthetically pleasing. This helps in creating a more seamless and realistic image,
+        #  especially in contexts  where the texture details are crucial, such as in photorealistic rendering.  
+        
+        #==>
+        # Coverage Gaps: Despite the intention to cover the entire texture map with data from various 
+        # viewpoints, gaps can occur. This might be due to occlusions, insufficient viewpoint coverage,
+        # or limitations in the image processing pipeline (e.g., alignment errors or inadequate resolution). 
+        # In such cases,  some regions of the texture map may not receive any data, resulting in default color patches.     
         background_type = 'none'
         use_render_back = False
         if background is not None and type(background) == str: # JA: If background is a string, set it as the type
@@ -625,7 +637,8 @@ class TexturedMeshModel(nn.Module):
             augmented_vertices[None].repeat(batch_size, 1, 1),
             self.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.face_attributes.repeat(batch_size, 1, 1, 1),
-            texture_img.repeat(batch_size, 1, 1, 1),
+           #MJ :texture_img.repeat(batch_size, 1, 1, 1),
+            texture_img.expand(batch_size, -1, -1, -1), #MJ: Note the use of -1 in .expand(), which tells PyTorch to keep the size of those dimensions as is (3, 1024, and 1024, respectively).
             elev=theta,
             azim=phi,
             radius=radius,
@@ -634,6 +647,21 @@ class TexturedMeshModel(nn.Module):
             dims=dims,
             background_type=background_type
         )
+        
+        #   texture_img.repeat(batch_size, 1, 1, 1),: When you use the repeat method in PyTorch, such as texture_img.repeat(batch_size, 1, 1, 1), 
+        # it does indeed create separate copies of texture_img in the resulting tensor, but these copies are
+        # not independent in terms of gradient computation.
+        # Gradients: Although repeat creates what seems like separate copies of the data for forward computation,
+        # all these copies still reference back to the original texture_img tensor when it comes to computing gradients.
+        # If a gradient is computed with respect to the repeated tensor during backpropagation, 
+        # it will aggregate (sum) the gradients from all copies back into the original texture_img.
+        # This means that the gradient of each parameter in texture_img will be the sum of the gradients
+        # computed across all batch instances where it was used.
+        
+        # Using .expand() is particularly useful in models where a parameter tensor (like weights, biases,
+        # or a specific feature map) needs to be applied identically across multiple instances 
+        # or positions without creating multiple independent copies, thus saving memory and computational resources.
+        
 
         mask = mask.detach()
 
