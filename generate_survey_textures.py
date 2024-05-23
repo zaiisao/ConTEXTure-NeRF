@@ -22,6 +22,8 @@ pairs = [
             "steampunk adventurer, leather attire with brass accessories",
             "astronaut in a sleek space suit, exploring alien worlds",
             "cyberpunk hacker, neon-lit clothing, main character in a dystopian cityscape"
+            "blue humanoid robot, low quality, blurry, noisy",
+            "a person in a red shirt and blue pants"
         ],
         "path": "texfusion_dataset/Text2Mesh/person.obj",
         "front_offset": -90.0
@@ -86,6 +88,13 @@ pairs = [
         "path": "shapes/human.obj"
     }
 
+    # {
+    #     "prompts": [
+    #         "a photo of spongebob squarepants"
+    #     ],
+    #     "path": "shapes/spongebob.obj"
+    # }
+
     # Age49-LoganWade -- WE DO NOT HAVE IT YET
     # Age26-AngelicaCollins -- WE DO NOT HAVE IT YET
 ]
@@ -101,9 +110,9 @@ for pair in pairs:
       exp_name += "_puredepth"
       print("PURE DEPTH")
 
-    if os.path.isdir(os.path.join(os.getcwd(), "experiments", exp_name)):
-      print(f"skipping {exp_name}")
-      continue
+    # if os.path.isdir(os.path.join(os.getcwd(), "experiments", exp_name)):
+    #   print(f"skipping {exp_name}")
+    #   continue
 
     success = False
     while success == False:
@@ -119,7 +128,9 @@ guide:
   use_zero123plus: True
   
 {"render:" if "front_offset" in pair else ""}
-  {("front_offset: " + str(pair["front_offset"])) if "front_offset" in pair else ""}""")
+  {("front_offset: " + str(pair["front_offset"])) if "front_offset" in pair else ""}
+optim:
+  learn_max_z_normals: True""")
           else:
             fp.write(f"""log:
   exp_name: "{Path(pair["path"]).stem}_{prompt}_puredepth"
@@ -127,6 +138,7 @@ guide:
   text: "{prompt}"
   shape_path: {pair["path"]}
   guidance_scale: 10
+  use_zero123plus: False
     
 {"render:" if "front_offset" in pair else ""}
   {("front_offset: " + str(pair["front_offset"])) if "front_offset" in pair else ""}""")
@@ -139,6 +151,7 @@ guide:
               trainer.full_eval()
             else:
               trainer.paint()
+            
 
           main()
         success = True
