@@ -1,5 +1,5 @@
 log:
-  exp_name: astronaut
+  exp_name: astronaut_noblending
 guide:
   text: "astronaut in a sleek space suit, exploring alien worlds"
   shape_path: texfusion_dataset/Text2Mesh/person.obj
