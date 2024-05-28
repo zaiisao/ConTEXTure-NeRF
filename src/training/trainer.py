@@ -521,6 +521,12 @@ class TEXTure:
             torch.cat((cropped_rgb_renders_small_list[3], cropped_rgb_renders_small_list[6]), dim=3),
         ), dim=2)
 
+        masks_grid = torch.cat((
+            torch.cat((masks_latent_list[1], masks_latent_list[4]), dim=3),
+            torch.cat((masks_latent_list[2], masks_latent_list[5]), dim=3),
+            torch.cat((masks_latent_list[3], masks_latent_list[6]), dim=3),
+        ), dim=2)
+
         # JA: the Zero123++ pipeline converts the latent space tensor z into pixel space
         # tensor x in the following manner:
         #   x = postprocess(unscale_image(vae_decode(unscale_latents(z) / scaling_factor)))
@@ -530,7 +536,7 @@ class TEXTure:
         preprocessed_cropped_rgb_renders_grid = self.zero123plus.image_processor.preprocess(cropped_rgb_renders_grid)
         scaled_cropped_rgb_renders_grid = scale_image(preprocessed_cropped_rgb_renders_grid.half())
 
-        scaled_latent_renders_grid =  self.zero123plus.vae.encode(  #MJ: encoding 320x320 to 40x40 by compressing 8 times
+        scaled_latent_renders_grid = self.zero123plus.vae.encode(  #MJ: encoding 320x320 to 40x40 by compressing 8 times
             scaled_cropped_rgb_renders_grid,
             return_dict=False
         )[0].sample() * self.zero123plus.vae.config.scaling_factor 
@@ -550,12 +556,6 @@ class TEXTure:
         # JA: Zero123++ was trained with 320x320 images: https://github.com/SUDO-AI-3D/zero123plus/issues/70
         cond_image = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
         depth_image = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0]).resize((640, 960))
-
-        masks_grid = torch.cat((
-            torch.cat((masks_latent_list[1], masks_latent_list[4]), dim=3),
-            torch.cat((masks_latent_list[2], masks_latent_list[5]), dim=3),
-            torch.cat((masks_latent_list[3], masks_latent_list[6]), dim=3),
-        ), dim=2)
 
         zero123plus_prep_end_time = time.perf_counter()  
         elapsed_time = zero123plus_prep_end_time - zero123plus_prep_start_time
