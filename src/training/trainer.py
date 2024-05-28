@@ -302,25 +302,21 @@ class TEXTure:
             self.phis.append(phi)
             self.radii.append(radius)
 
-        #MJ: check if we use project_back_max_z_normals to learn the max_z_normals texture map  
-        # It computes the self.meta_texture_img which contains the best z normals among all viewpoints
-      
-        if not self.cfg.optim.learn_max_z_normals: #MJ: when you do not use learn_max_z_normals
-          
+        if not self.cfg.optim.learn_max_z_normals:
             augmented_vertices = self.mesh_model.mesh.vertices
 
             batch_size = len(self.dataloaders['train'])
+
             # JA: We need to repeat several tensors to support the batch size.
             # For example, with a tensor of the shape, [1, 3, 1200, 1200], doing
             # repeat(batch_size, 1, 1, 1) results in [1 * batch_size, 3 * 1, 1200 * 1, 1200 * 1]
-            mask, depth_map, normals_image,face_normals,face_idx = self.mesh_model.render_face_normals_face_idx(
+            _, _, _, face_normals, face_idx = self.mesh_model.render_face_normals_face_idx(
                 augmented_vertices[None].repeat(batch_size, 1, 1),
                 self.mesh_model.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
                 self.mesh_model.face_attributes.repeat(batch_size, 1, 1, 1),
-                
-                elev=torch.tensor( self.thetas).to(self.device), #MJ: elev should a tensor
-                azim=torch.tensor( self.phis).to(self.device),
-                radius=torch.tensor( self.radii).to(self.device),
+                elev=torch.tensor(self.thetas).to(self.device), # MJ: elev, azim, and radius should be tensors
+                azim=torch.tensor(self.phis).to(self.device),
+                radius=torch.tensor(self.radii).to(self.device),
                 
                 look_at_height=self.mesh_model.dy,
                 background_type='none'
@@ -351,53 +347,44 @@ class TEXTure:
                 #MJ: face_normals[views, 2, face_ids] 
         
         else: 
-           
-            #MJ: you need to learn max_z_normals if you use learn_max_z_normals  to define self.view_weights 
-      
+            #MJ: you need to learn max_z_normals if you use learn_max_z_normals  to define self.view_weights
             self.project_back_max_z_normals()
-            
+
             #MJ: Render all views using self.meta_texture_img (max_z_normals) learned  by  self.project_back_max_z_normals()           
             meta_outputs = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii,
                                                     background=torch.Tensor([0, 0, 0]).to(self.device),
                                                     use_meta_texture=True, render_cache=None)
             z_normals = meta_outputs["normals"][:,2:3,:,:].clamp(0, 1)
             max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1) 
+
             #MJ: max_z_normals refers to the projection of self.meta_texture_img, which is a leaf tensor (parameter tensor)
             self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
-            #self.view_weights is a function of self.meta_texture_img; When self.view_weights is used to compute a loss
+            # self.view_weights is a function of self.meta_texture_img; When self.view_weights is used to compute a loss
             # self.view_weights.detach() should be used to avoid an error of re-using the freed computational graph
-            
-            #MJ: try to vary alpha from -1 to -10: If alpha approaches -10, 
-            # the face_idx whose z_normals are greater have more weights
     
             #MJ: for debugging:
-            #max_z_normals_red =  meta_outputs['image'][:,:,:,:].clamp(0, 1)       
-            # for i in range( len(self.thetas) ):
-               
+            # max_z_normals_red = meta_outputs['image'][:,:,:,:].clamp(0, 1)       
+            # for i in range(len(self.thetas)):
             #     self.log_train_image(
             #         torch.cat((z_normals[i][None], z_normals[i][None], z_normals[i][None]), dim=1),
             #         f'z_normals_{i}'
             #     )
-            #     self.log_train_image( torch.cat( (max_z_normals[i][None], max_z_normals[i][None],
-            #                                        max_z_normals[i][None]), dim=1), f'max_z_normals_gray_{i}' )
+            #     self.log_train_image(torch.cat((max_z_normals[i][None], max_z_normals[i][None],
+            #                                        max_z_normals[i][None]), dim=1), f'max_z_normals_gray_{i}')
                 
-            #     self.log_train_image( max_z_normals_red[i][None], f'max_z_normals_red_{i}' )
+            #     self.log_train_image(max_z_normals_red[i][None], f'max_z_normals_red_{i}')
                 
-            #     self.log_train_image( torch.cat( (self.view_weights[i][None], self.view_weights[i][None], self.view_weights[i][None]), dim=1),
-            #                           f'view_weights_{i}' )  #MJ: view_weights: (B,1,H,W)
+            #     self.log_train_image(torch.cat((self.view_weights[i][None], self.view_weights[i][None], self.view_weights[i][None]), dim=1),
+            #                           f'view_weights_{i}')  # MJ: view_weights: (B,1,H,W)
           
-        #End of self.cfg.optim.learn_max_z_normals
+        # End of self.cfg.optim.learn_max_z_normals
 
         logger.info(f'Successfully initialized {self.cfg.log.exp_name}')
-
-      
-
 
     def paint_zero123plus(self):
         logger.info('Starting training ^_^')
         
         zero123_start_time = time.perf_counter()  # Record the start time
-        
         zero123plus_prep_start_time = time.perf_counter()  # Record the end time
         
         self.define_view_weights()
@@ -409,8 +396,7 @@ class TEXTure:
         # JA: This color is the same as the background color of the image grid generated by Zero123++.
         background_gray = torch.Tensor([0.5, 0.5, 0.5]).to(self.device)
         front_image = None
-        
-              
+
         frontview_data_iter = iter(self.dataloaders['train'])
         frontview_data = next(frontview_data_iter)  # Gets the first batch
                         
@@ -435,8 +421,8 @@ class TEXTure:
         #MJ: At this point, self.texture_img has been learned from the front view image; 
         # So when the mesh is rendered  this learned texture map will be used  to render the mesh   
         self.outputs = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii, background=background_gray)
-        self.rgb_renders =  self.outputs['image']
-        self.render_cache =  self.outputs['render_cache']        
+        self.rgb_renders = self.outputs['image']
+        self.render_cache = self.outputs['render_cache']        
        
         #MJ: Rendering the mesh again using use_median = True updates the default color
         #  # region (magenta color) of texture map with the median color of the learned texture map from the front view
@@ -684,9 +670,9 @@ class TEXTure:
             #     print(f'being_close(noises_latent, noises_individual) \
             #         ={torch.allclose(noises_latent[0], noises_individual[0],  atol=1e-3, rtol=1e-3) }')    
            
-            grid_latent = callback_kwargs["latents"]
+            grid_latent = callback_kwargs["latents"] # JA: grid_latent is z_{t-1}, that is, z_{t_prev}
 
-            tile_size = 320 //   pipeline.vae_scale_factor #MJ: 320/8 = 40
+            # tile_size = 320 //   pipeline.vae_scale_factor #MJ: 320/8 = 40
             # latents_list = split_zero123plus_grid(grid_latent,   tile_size)
             
             # grid_latent_otherviews2 = torch.empty( (6, 4, 40,40), device= grid_latent.device)
@@ -708,7 +694,8 @@ class TEXTure:
             # if (iter == 0): 
             #    utils.seed_everything(self.cfg.optim.seed) 
 
-            if t == pipeline.scheduler.timesteps[-1]:
+            if t == pipeline.scheduler.timesteps[-1]: # JA: If t is equal to the last time point, which is 0
+                # JA: At this moment when on_step_end is called, latent is equal to z_{t-1} (z_{iter + 1})
                 noised_cropped_rgb_renders_grid = self.gt_renders_latent_allviews
             else:
                 noises_latent = torch.randn_like(grid_latent)
@@ -720,8 +707,10 @@ class TEXTure:
 
             # #MJ: During the operation, t[None] would behave as if it is a tensor of shape (1, 1, 1, 1), effectively repeating its value 
             # # across all other dimensions to match the size of (6, 4, 40, 40).
+
+            blended_grid_latent = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid))
     
-            callback_kwargs["latents"] = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid)).half()
+            callback_kwargs["latents"] = blended_grid_latent.half()
 
             # # #MJ: combine a set of view blended latent images into 3x2 form tensor to set it to   callback_kwargs["latents"]
             # tile_size = 320//self.zero123plus.vae_scale_factor
