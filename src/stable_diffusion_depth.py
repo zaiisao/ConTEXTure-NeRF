@@ -71,7 +71,7 @@ class StableDiffusion(nn.Module):
 
         if self.use_inpaint:
             self.inpaint_unet = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-2-inpainting",
-                                                                     subfolder="unet", use_auth_token=self.token).to(
+                                                                     subfolder="unet", use_auth_token=self.token, torch_dtype=torch.float16).to(
                 self.device)
 
         if self.second_model_type == "control_zero123":
