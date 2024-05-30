@@ -561,6 +561,9 @@ class TEXTure:
         elapsed_time = zero123plus_prep_end_time - zero123plus_prep_start_time
         print(f'zero123plus_prep_time={elapsed_time:0.4f}')
 
+        self.previous_grid_latent = None
+        self.zero123plus_unet = self.zero123plus.unet
+
         @torch.enable_grad
         def on_step_end(pipeline, iter, t, callback_kwargs):
             grid_latent = callback_kwargs["latents"] # JA: grid_latent is z_{t-1}, that is, z_{t_prev}
@@ -568,6 +571,57 @@ class TEXTure:
             if t == pipeline.scheduler.timesteps[-1]: # JA: If t is equal to the last time point, which is 0
                 # JA: At this moment when on_step_end is called, latent is equal to z_{t-1} (z_{iter + 1})
                 noised_cropped_rgb_renders_grid = gt_renders_latent_allviews
+            elif iter >= 10 and iter < 20 and iter % 2 == 1:
+                grid_latent = self.previous_grid_latent
+
+                # JA: At every iteration, pipeline.scheduler.step is called which increments the _step_index
+                # value by 1. Since this ad-hoc approach allows denoising in every step but we end up discarding
+                # the denoised latents when the iteration is an odd number and between 10 and 20, we are
+                # technically calling pipeline.scheduler.step twice on each of these iteration steps. This
+                # requires us to manually decrement the _step_index value to undo the incrementation done for
+                # the discarded denoised latent.
+                pipeline.scheduler._step_index -= 1
+
+                masked_latents = grid_latent * (masks_grid < 0.5) + 0.5 * (masks_grid >= 0.5)
+
+                latent_model_input_inpaint = torch.cat(
+                    [torch.cat([grid_latent, masks_grid, masked_latents], dim=1)] * 2
+                ).half()
+
+                with torch.no_grad():
+                    noise_pred_inpaint = self.diffusion.inpaint_unet(
+                        latent_model_input_inpaint,
+                        pipeline.scheduler.timesteps[iter + 1][None],
+
+                        # JA: Assuming append_direction is set to True, this will (erroneously) append the text embedding
+                        # that corresponds to the front view (i.e. the text embedding like "a picture of spiderman, front
+                        # view"). Since the grid shows images from more angles than the front, the text embedding should
+                        # not specify a direction (e.g. "a picture of spiderman").
+                        encoder_hidden_states=self.text_z[0].half()
+                    )['sample']
+                    noise_pred = noise_pred_inpaint
+
+                # JA: The guidance_scale config value is a leftover characteristic of the TEXTure code. It refers to the
+                # guidance scale used in the interleaved depth and inpainting pipelines of TEXTure. This is not to be
+                # confused with pipeline.guidance_scale, which is the guidance scale of the Zero123++ pipeline.
+                guidance_scale = self.cfg.guide.guidance_scale
+
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                latents = pipeline.scheduler.step(
+                    noise_pred,
+                    pipeline.scheduler.timesteps[iter + 1][None],
+                    grid_latent
+                )['prev_sample']
+
+                # latents = self.diffusion.encode_imgs(cropped_rgb_renders_grid)
+                noises_latent = torch.randn_like(grid_latent)
+                noised_cropped_rgb_renders_grid = pipeline.scheduler.add_noise(
+                    latents,
+                    noises_latent,
+                    pipeline.scheduler.timesteps[iter + 1][None]
+                )
             else:
                 # MJ: Noisify the GT rendered image at the same noise level as the latent  in the latent space
                 noises_latent = torch.randn_like(grid_latent)
@@ -591,8 +645,10 @@ class TEXTure:
             # But, the new region should be well-aligned with the part that is already valid; This part is
             # considered as the background in the context of inpainting.
             blended_grid_latent = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid))
-    
+
             callback_kwargs["latents"] = blended_grid_latent.half()
+
+            self.previous_grid_latent = callback_kwargs["latents"]
 
             return callback_kwargs
         
