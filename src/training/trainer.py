@@ -239,7 +239,19 @@ class TEXTure:
 
     def calc_text_embeddings(self) -> Union[torch.Tensor, List[torch.Tensor]]:
         ref_text = self.cfg.guide.text
-        if not self.cfg.guide.append_direction:
+        if self.cfg.guide.use_zero123plus:
+            assert not self.cfg.guide.append_direction, "append_direction should be False when use_zero123plus is True"
+
+            text_z = []
+            text_string = []
+
+            text_string.append(ref_text)
+            text_string.append(ref_text + ", front view")
+            
+            for text in text_string:
+                negative_prompt = None
+                text_z.append(self.diffusion.get_text_embeds([text], negative_prompt=negative_prompt))
+        elif not self.cfg.guide.append_direction:
             text_z = self.diffusion.get_text_embeds([ref_text])
             text_string = ref_text
         else:
@@ -247,9 +259,6 @@ class TEXTure:
             text_string = []
             for d in self.view_dirs:
                 text = ref_text.format(d)
-                if self.cfg.guide.use_zero123plus: #added by MJ
-                    if d != 'front':
-                        text = "" # JA: For all non-frontal views, we wish to use a null string prompt
                 text_string.append(text)
                 logger.info(text)
                 negative_prompt = None
@@ -564,6 +573,8 @@ class TEXTure:
         self.previous_grid_latent = None
         self.zero123plus_unet = self.zero123plus.unet
 
+        self.should_inpaint = False
+
         @torch.enable_grad
         def on_step_end(pipeline, iter, t, callback_kwargs):
             grid_latent = callback_kwargs["latents"] # JA: grid_latent is z_{t-1}, that is, z_{t_prev}
@@ -571,7 +582,7 @@ class TEXTure:
             if t == pipeline.scheduler.timesteps[-1]: # JA: If t is equal to the last time point, which is 0
                 # JA: At this moment when on_step_end is called, latent is equal to z_{t-1} (z_{iter + 1})
                 noised_cropped_rgb_renders_grid = gt_renders_latent_allviews
-            elif iter >= 10 and iter < 20 and iter % 2 == 1:
+            elif iter >= 10 and iter < 20 and iter % 2 == 1 and self.should_inpaint:
                 grid_latent = self.previous_grid_latent
 
                 # JA: At every iteration, pipeline.scheduler.step is called which increments the _step_index
@@ -660,6 +671,7 @@ class TEXTure:
         #MJ: Generate a 3x2 grid image conditioned on the front view image and the 6 depth maps of the mesh
         result = self.zero123plus(
             cond_image,
+            prompt=self.text_string[0],
             depth_image=depth_image,
             num_inference_steps=50,
             callback_on_step_end=on_step_end
@@ -887,13 +899,19 @@ class TEXTure:
         # self.log_train_image(z_normals_cache[0, 0], 'paint_viewpoint:z_normals_cache', colormap=True)
 
         # text embeddings
-        if self.cfg.guide.append_direction:
+        if self.cfg.guide.use_zero123plus:
+            text_z = self.text_z[1]
+            text_string = self.text_string[1]
+            view_dir = "front"
+        elif self.cfg.guide.append_direction:
             dirs = data['dir']  # [B,]
             text_z = self.text_z[dirs] # JA: dirs is one of the six directions. text_z is the embedding vector of the specific view prompt
             text_string = self.text_string[dirs]
+            view_dir = self.view_dirs[dirs]
         else:
             text_z = self.text_z
             text_string = self.text_string
+            view_dir = None
         logger.info(f'text: {text_string}')
 
         #MJ: Because we do not consider each viewpoint in a sequence to project-back the view image to the texture-atlas, we do not use the trimap
@@ -993,7 +1011,7 @@ class TEXTure:
 
                                                                     # JA: The following were added to use the view image
                                                                     # created by Zero123
-                                                                    view_dir=self.view_dirs[dirs], # JA: view_dir = "left",e.g.; this is used to check if the view direction is front
+                                                                    view_dir=view_dir, # JA: view_dir = "left",e.g.; this is used to check if the view direction is front
                                                                     front_image=resized_zero123_front_input,
                                                                     phi=data['phi'],
                                                                     theta=data['base_theta'] - data['theta'],
@@ -1045,7 +1063,7 @@ class TEXTure:
             # This rendered image will be compressed to the shape of (512, 512) which is the shape of the diffusion
             # model.
 
-        if self.view_dirs[dirs] == "front":
+        if view_dir == "front":
             self.zero123_front_input = zero123_input
         
         # if self.zero123_inputs is None:

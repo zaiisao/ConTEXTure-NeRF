@@ -39,7 +39,7 @@ class GuideConfig:
     # The mesh to paint
     shape_path: str = 'shapes/spot_triangulated.obj'
     # Append direction to text prompts
-    append_direction: bool = True
+    append_direction: bool = False
     # A Textual-Inversion concept to use
     concept_name: Optional[str] = None
     # Path to the TI embedding
