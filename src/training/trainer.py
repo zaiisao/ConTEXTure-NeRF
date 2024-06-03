@@ -225,7 +225,7 @@ class TEXTure:
     
     def init_zero123plus(self) -> DiffusionPipeline:
         pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.1", custom_pipeline="sudo-ai/zero123plus-pipeline",
+            "sudo-ai/zero123plus-v1.1", custom_pipeline="src/zero123plus.py",
             torch_dtype=torch.float16
         )
 
@@ -481,7 +481,7 @@ class TEXTure:
         # As it can be seen here, the foreground is closer to 0 (black) and background closer to 1 (white).
         # This is opposite of the SD 2.0 pipeline and the TEXTure internal renderer and must be inverted
         # (i.e. 1 minus the depth map, since the depth map is normalized to be between 0 and 1)
-        depth = 1 - outputs['depth']
+        depth = torch.clamp(1 - outputs['depth'], 0, 1)
 
         # JA: The generated depth only has one channel, but the Zero123++ pipeline requires an RGBA image.
         # The mask is the object mask, such that the background has value of 0 and the foreground a value of 1.
@@ -573,16 +573,18 @@ class TEXTure:
         self.previous_grid_latent = None
         self.zero123plus_unet = self.zero123plus.unet
 
-        self.should_inpaint = False
+        self.should_inpaint = True
 
         @torch.enable_grad
         def on_step_end(pipeline, iter, t, callback_kwargs):
             grid_latent = callback_kwargs["latents"] # JA: grid_latent is z_{t-1}, that is, z_{t_prev}
 
+            is_inpaint_iter = iter >= 10 and iter < 20 and iter % 2 == 1 and self.should_inpaint
+
             if t == pipeline.scheduler.timesteps[-1]: # JA: If t is equal to the last time point, which is 0
                 # JA: At this moment when on_step_end is called, latent is equal to z_{t-1} (z_{iter + 1})
                 noised_cropped_rgb_renders_grid = gt_renders_latent_allviews
-            elif iter >= 10 and iter < 20 and iter % 2 == 1 and self.should_inpaint:
+            elif is_inpaint_iter:
                 grid_latent = self.previous_grid_latent
 
                 # JA: At every iteration, pipeline.scheduler.step is called which increments the _step_index
@@ -593,7 +595,7 @@ class TEXTure:
                 # the discarded denoised latent.
                 pipeline.scheduler._step_index -= 1
 
-                masked_latents = grid_latent * (masks_grid < 0.5) + 0.5 * (masks_grid >= 0.5)
+                masked_latents = gt_renders_latent_allviews * (masks_grid >= 0.5) + 0.5 * (masks_grid >= 0.5)
 
                 latent_model_input_inpaint = torch.cat(
                     [torch.cat([grid_latent, masks_grid, masked_latents], dim=1)] * 2
@@ -655,11 +657,15 @@ class TEXTure:
             # it is taken to mean that the new region should be painted by the generated image.isidentifier()
             # But, the new region should be well-aligned with the part that is already valid; This part is
             # considered as the background in the context of inpainting.
-            blended_grid_latent = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid))
+            if not is_inpaint_iter:
+                blended_grid_latent = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid))
+                callback_kwargs["latents"] = blended_grid_latent.half()
+            else:
+                callback_kwargs["latents"] = grid_latent
 
-            callback_kwargs["latents"] = blended_grid_latent.half()
+            # callback_kwargs["latents"] = blended_grid_latent.half()
 
-            self.previous_grid_latent = callback_kwargs["latents"]
+            self.previous_grid_latent = callback_kwargs["latents"].clone()
 
             return callback_kwargs
         
