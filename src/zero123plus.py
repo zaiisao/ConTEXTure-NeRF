@@ -432,6 +432,13 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+
+        use_inpaint: bool = False,
+        use_blending: bool = False,
+        latent_mask_grid: torch.FloatTensor = None,
+        latent_renders_grid: torch.FloatTensor = None,
+        masked_input_latents: torch.FloatTensor = None,
+
         **kwargs,
     ):
         r"""
@@ -640,21 +647,46 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                # JA: blend the current latents with the ground truth render image and use the latents within UNet
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
+                is_inpaint_range = use_inpaint and (10 < i < 20)
+                if not is_inpaint_range and use_blending:
+                    #When i == len(timesteps) - 1, t =0, and the sigma corresponding to this time is very small, but not zero
+                    noises_latent = torch.randn_like(latents)
+                    noised_cropped_rgb_renders_grid = self.scheduler.add_noise(
+                        latent_mask_grid, #MJ: shape=(1,4,120,80); dtype=torch.float16
+                        noises_latent,                #MJ: shape=(1,4,120,80); dtype = torch.float16
+                        t[None]                        #MJ: shape=[1]
+                    )
+                    latents = (latents * latent_mask_grid + noised_cropped_rgb_renders_grid * (1 - latent_mask_grid))
+
+                if not is_inpaint_range:
+                    latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                    # predict the noise residual
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep_cond=timestep_cond,
+                        cross_attention_kwargs=self.cross_attention_kwargs,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
+                else: #predict the noise residual using the sd inpaint pipeline
+                    #MJ: doubles the "batch size" of the input tensors grid_latent, masks_grid, masked_input_latents, for classifier-free guidance
+                    latent_model_input_inpaint = torch.cat(
+                        [torch.cat([latents, latent_mask_grid, masked_input_latents], dim=1)] * 2
+                    )
+
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input_inpaint, t)
+
+                    with torch.no_grad():
+                        noise_pred = self.inpaint_unet(
+                            latent_model_input, t,
+                            encoder_hidden_states=prompt_embeds,
+                            return_dict=True
+                       )['sample']
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
@@ -667,6 +699,12 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+                #MJ: Experiment with this operation.
+                #When  i == len(timesteps) - 1, t =0, and we have reached the last iteration
+                # of denoising loop. Blend this last latent with the clean ground truth render image
+                if i == len(timesteps) - 1 and use_blending:
+                    latents = (latents * latent_mask_grid + latent_renders_grid * (1 - latent_mask_grid))
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
