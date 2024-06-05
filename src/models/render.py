@@ -62,30 +62,25 @@ class Renderer:
 
     def normalize_multiple_depth(self, depth_maps):
         assert (depth_maps.amax(dim=(1, 2)) <= 0).all(), 'depth map should be negative'
+        assert not (depth_maps == 0).all(), 'depth map should not be empty'
         object_mask = depth_maps != 0  # Mask for non-background pixels
 
         # To handle operations for masked regions, we need to use masked operations
         # Set default min and max values to avoid affecting the normalization
         masked_depth_maps = torch.where(object_mask, depth_maps, torch.tensor(float('inf')).to(depth_maps.device))
-        min_depth = masked_depth_maps.amin(dim=(1, 2), keepdim=True)[0]
+        min_depth = masked_depth_maps.amin(dim=(1, 2), keepdim=True)
 
         masked_depth_maps = torch.where(object_mask, depth_maps, torch.tensor(-float('inf')).to(depth_maps.device))
-        max_depth = masked_depth_maps.amax(dim=(1, 2), keepdim=True)[0]
-
-        # Replace 'inf' with zeros in cases where no valid object pixels are found
-        min_depth[min_depth == float('inf')] = 0
-        max_depth[max_depth == -float('inf')] = 0
+        max_depth = masked_depth_maps.amax(dim=(1, 2), keepdim=True)
 
         range_depth = max_depth - min_depth
-        # Prevent division by zero
-        range_depth[range_depth == 0] = 1
 
         # Calculate normalized depth maps
         min_val = 0.5
         normalized_depth_maps = torch.where(
             object_mask,
             ((1 - min_val) * (depth_maps - min_depth) / range_depth) + min_val,
-            torch.zeros_like(depth_maps)
+            depth_maps # JA: Where the object mask is 0, depth map is 0 and we will return it
         )
 
         return normalized_depth_maps

@@ -483,7 +483,7 @@ class TEXTure:
         # As it can be seen here, the foreground is closer to 0 (black) and background closer to 1 (white).
         # This is opposite of the SD 2.0 pipeline and the TEXTure internal renderer and must be inverted
         # (i.e. 1 minus the depth map, since the depth map is normalized to be between 0 and 1)
-        depth = torch.clamp(1 - outputs['depth'], 0, 1)
+        depth = 1 - outputs['depth']
 
         # JA: The generated depth only has one channel, but the Zero123++ pipeline requires an RGBA image.
         # The mask is the object mask, such that the background has value of 0 and the foreground a value of 1.
@@ -688,8 +688,8 @@ class TEXTure:
             depth_image=depth_image,
             num_inference_steps=50,
 
-            use_inpaint=True,
-            use_blending=True,
+            use_inpaint=False,
+            use_blending=False,
             latent_mask_grid=masks_grid.half(),
             latent_renders_grid=gt_renders_latent_grid,
             masked_input_latents=masked_input_latents.half(),
