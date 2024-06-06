@@ -1,12 +1,12 @@
 log:
-  exp_name: spiderman_c0123_5_1
+  exp_name: spiderman
 guide:
-  text: "A photo of Spiderman, {} view"
-  append_direction: True
+  text: "A photo of Spiderman"
+  append_direction: False
   shape_path: shapes/human.obj
   guidance_scale: 10
-  second_model_type: "control_zero123"
-
-  individual_control_of_conditions: True
-  guidance_scale_i: 5
-  guidance_scale_t: 1
+  use_zero123plus: True
+optim:
+  # seed: 100
+  learn_max_z_normals: True
+  alpha: -10
