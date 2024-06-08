@@ -1530,100 +1530,62 @@ class TEXTure:
         # )
     
     def project_back_max_z_normals(self):
-                       
-              
         optimizer = torch.optim.Adam(self.mesh_model.get_params_max_z_normals(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
-                                        eps=1e-15)        
-        
-            
-        for v in range( len(self.thetas) ):  
-    
-            #MJ: Render the max_z_normals (self.meta_texure_img) which has been learned using the previous view z_normals
-            # At the beginning of the for loop, self.meta_texture_img is set to 0
-            
-            meta_output_v = self.mesh_model.render(theta=self.thetas[v], phi=self.phis[v], radius=self.radii[v],
-                                                background=torch.Tensor([0, 0, 0]).to(self.device),
-                                                        use_meta_texture=True, render_cache=None)
-            render_cache_v =  meta_output_v['render_cache']
-            curr_max_z_normals_pred_v = meta_output_v['image'][:,0:1,:,:]   #MJ: meta_output['image'] is the projected meta_texture_img
-            
-            z_normals_v = meta_output_v['normals'][:,2:3,:,:]   
-        
-            #MJ: z_normals is the z component of the normal vectors of the faces seen by each view
-            z_normals_mask_v = meta_output_v['mask']   #MJ: shape = (1,1,1200,1200)
-            
-            #MJ: Try blurring the object-mask "curr_z_mask" with Gaussian blurring: 
-            # The following code is a simply  cut and paste from project-back:
-            object_mask_v = z_normals_mask_v
-            #MJ: erode the boundary of the mask
-            object_mask_v = torch.from_numpy( cv2.erode(object_mask_v[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8)) ).to(
-                                 object_mask_v.device).unsqueeze(0).unsqueeze(0)
-                                 
-            # object_mask = torch.from_numpy(
-            #     cv2.erode(object_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
-            #     object_mask.device).unsqueeze(0).unsqueeze(0)
-            # render_update_mask = object_mask.clone()
-            render_update_mask_v =  object_mask_v.clone()
+                                        eps=1e-15)
 
-            #MJ: dilate the bounary of the mask
-            blurred_render_update_mask_v = torch.from_numpy(
-                 cv2.dilate(render_update_mask_v[0, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))).to(
-                 render_update_mask_v.device).unsqueeze(0).unsqueeze(0)
-                
-          
-            blurred_render_update_mask_v = utils.gaussian_blur(blurred_render_update_mask_v, 21, 16)
+        #End  for v in range( len(self.thetas) )
+        with  tqdm(range(300), desc='project_back_max_z_normals:fitting max_z_normals') as pbar:
+            render_cache = None
+            for iter in pbar:
+                #MJ: Render the max_z_normals (self.meta_texure_img) which has been learned using the previous view z_normals
+                # At the beginning of the for loop, self.meta_texture_img is set to 0
+                if render_cache is None:
+                    meta_output = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii,
+                                                    background=torch.Tensor([0, 0, 0]).to(self.device),
+                                                            use_meta_texture=True, render_cache=None)
+                    render_cache = meta_output["render_cache"]
+                else:
+                    meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device), use_meta_texture=True, render_cache=render_cache)
 
-            # Do not get out of the object
-            blurred_render_update_mask_v[object_mask_v == 0] = 0
-                         
-            #MJ: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True),
-            # rather than torch.tensor(sourceTensor).        
-            # max_z_normals_target = torch.tensor(curr_max_z_normals_pred)   #MJ: max_z_normals_target will refer to a copy of max_z_normals_pred
-            max_z_normals_target_v = curr_max_z_normals_pred_v.clone().detach() 
-            #MJ: Compare the curr max_z_normals and the curr_z_normals and update  max_z_normals_target
-            max_z_normals_target_v[0, 0, :, :] = torch.max(max_z_normals_target_v[0, 0, :, :], z_normals_v[0, 0, :, :])    
-            
-            self.log_train_image(torch.cat([max_z_normals_target_v, max_z_normals_target_v,max_z_normals_target_v], dim=1),
-                                f'project_back_max_z_normals:max_z_normals_target_v')
-                       
-            curr_max_z_normals_pred_v = curr_max_z_normals_pred_v *    blurred_render_update_mask_v.float()    
-            max_z_normals_target_v = max_z_normals_target_v *    blurred_render_update_mask_v.float()    
-            #MJ: z_normals: (1,1,1200,1200)                 
-                               
-            with  tqdm(range(300), desc='project_back_max_z_normals:fitting max_z_normals') as pbar:
-                for iter in pbar:
-                    optimizer.zero_grad()                   
-                   
-                    
-                    loss_v = ( curr_max_z_normals_pred_v -   max_z_normals_target_v.detach()).pow(2).mean()
-                    
-                    #MJ: The above line is equivalent to:                     
-                    # loss = 0
-                    # for i in range( masked_max_z_normals_pred.shape[0]):
-                    #    # Compute the mean squared error for each batch element separately                          
-                    #     view_loss =  (masked_max_z_normals_pred[i] - masked_curr_z_normals_target[i].detach()).pow(2).mean()      
-                    
-                    #     loss += view_loss #Accumulate the individual loss for each viewpoint
-                                
-                    # loss /=  masked_max_z_normals_pred.shape[0]      
-                              
-                                
-                    loss_v.backward() # JA: Compute the gradient vector of the loss with respect to the trainable parameters of
-                                    # the network, that is, the pixel value of the texture atlas
-                    optimizer.step()
-                    #MJ: debug: pbar.set_description(f"project_back_max_z_normals:Fitting max_z_normals -view={v}: Epoch={iter + 1}, Loss: {loss_v.item():.7f}")
-                    
-                    #MJ: Render the learned meta_texture_img to produce the new  curr_max_z_normals_pred 
-                    meta_output_v = self.mesh_model.render( background=torch.Tensor([0, 0, 0]).to(self.device),
-                                                        use_meta_texture=True, render_cache=render_cache_v)
-                    
-                    curr_max_z_normals_pred_v = meta_output_v['image'][:,0:1,:,:]   #MJ: meta_output['image'] is the projected meta_texture_img
-            
-                    curr_max_z_normals_pred_v = curr_max_z_normals_pred_v *    blurred_render_update_mask_v.float()    
-                             
-            #End for _ in tqdm(range(300), desc='fitting max_z_normals')    
-        #End for v in range(self.thetas)    # scan over the 7 views 
-  
+                max_z_normals_projected = meta_output['image'][:,0:1,:,:]
+                #MJ: meta_output['image'] is the projected meta_texture_img; The first channel refers to the max_z_normals in the current view
+                z_normals = meta_output['normals'][:,2:3,:,:]   #MJ: Get the z component of the face normal in the current view
+                #MJ: z_normals is the z component of the normal vectors of the faces seen by each view
+                z_normals_mask = meta_output['mask']   #MJ: shape = (1,1,1200,1200)
+                #MJ: Try blurring the object-mask "curr_z_mask" with Gaussian blurring:
+                # The following code is a simply  cut and paste from project-back:
+                object_mask = z_normals_mask
+                # #MJ: erode the boundary of the mask
+                # object_mask_v = torch.from_numpy( cv2.erode(object_mask_v[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8)) ).to(
+                #                      object_mask_v.device).unsqueeze(0).unsqueeze(0)
+                # # object_mask = torch.from_numpy(
+                # #     cv2.erode(object_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
+                # #     object_mask.device).unsqueeze(0).unsqueeze(0)
+                # # render_update_mask = object_mask.clone()
+                render_update_mask =  object_mask.clone()
+                # #MJ: dilate the bounary of the mask
+                # blurred_render_update_mask_v = torch.from_numpy(
+                #      cv2.dilate(render_update_mask_v[0, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))).to(
+                #      render_update_mask_v.device).unsqueeze(0).unsqueeze(0)
+                # blurred_render_update_mask_v = utils.gaussian_blur(blurred_render_update_mask_v, 21, 16)
+                # # Do not get out of the object
+                # blurred_render_update_mask_v[object_mask_v == 0] = 0
+                max_z_normals_projected  = max_z_normals_projected.clone()  *    render_update_mask.float()
+                z_normals = z_normals.clone() *  render_update_mask.float()
+                delta =  max_z_normals_projected -   z_normals
+            # Compute the ReLU of the negative differences
+                loss_v = F.relu(-delta)  # Shape: (B, 1, h, w)
+                # Sum the loss over all pixels and add to total loss
+
+                total_loss = loss_v.sum()
+
+                optimizer.zero_grad()
+                total_loss.backward() # JA: Compute the gradient vector of the loss with respect 
+                                # to the trainable parameters of the network, that is, the pixel value of the
+                                # texture atlas
+                optimizer.step()
+                pbar.set_description(f"zero123plus: Fitting mesh colors -Epoch {iter}, Loss: {total_loss.item():.7f}")
+        #End for _ in tqdm(range(300), desc='fitting max_z_normals')
                 
          
     def compute_view_weights(self, z_normals, max_z_normals, alpha=-10.0 ):        
@@ -1649,9 +1611,9 @@ class TEXTure:
         #     print(f'max  delta for view-{i}:{delta[i].max()}')
         #MJ: delta is supposed to be greater than 0; But sometimes, z_normals is greater than max_z_normals.
         # It means that project_back_max_z_normals() was not fully successful.
-        abs_delta = torch.abs( delta )
+        # abs_delta = torch.abs( delta )
         # Calculate the weights using an exponential function, multiplying by negative alpha
-        weights = torch.exp(alpha * abs_delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
+        weights = torch.exp(alpha * delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
         
         #debug: for i in range( weights.shape[0]):
         #     print(f'min weights  for view-{i}:{weights[i].min()}')

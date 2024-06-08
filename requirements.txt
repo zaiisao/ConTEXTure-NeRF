@@ -11,8 +11,9 @@ loguru
 tqdm
 einops
 opencv-python
-diffusers==0.20.0
+diffusers==0.27.2
 imageio
 torch-scatter
 transformers
 omegaconf
+imageio[ffmpeg]
