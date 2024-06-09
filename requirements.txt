@@ -1,19 +1,23 @@
 torch==2.1.1 --index-url https://download.pytorch.org/whl/cu121
 torchvision==0.16.1 --index-url https://download.pytorch.org/whl/cu121
-torchaudio==2.1.1 --index-url https://download.pytorch.org/whl/cu121
-accelerate
-huggingface-hub
-ninja
-xatlas
-matplotlib
-pyrallis
-loguru
-tqdm
-einops
-opencv-python
+accelerate==0.31.0
+huggingface-hub==0.23.3
+ninja==1.11.1.1
+xatlas==0.0.9
+matplotlib==3.8.0
+pyrallis==0.3.1
+loguru==0.7.2
+tqdm==4.65.0
+einops==0.8.0
+opencv-python==4.10.0.82
 diffusers==0.27.2
-imageio
-torch-scatter
+imageio==2.9.0
+imageio-ffmpeg==0.4.2
 transformers
 omegaconf
-imageio[ffmpeg]
+aiofiles==23.2.1
+fastapi==0.110.1
+pydantic==2.6.4
+python-multipart==0.0.9
+typing==3.7.4.3
+uvicorn==0.29.0

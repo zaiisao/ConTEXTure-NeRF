@@ -15,41 +15,46 @@ Official Implementation for ConTEXTure.
 
 ### Installation :floppy_disk:
 
-#### 1. Install from requirements file
+#### 0. Create a new virtual environment
+
+If you use Anaconda, a new virtual environment can be created and activated in the following manner:
+
+```bash
+conda create -n ConTEXTure python=3.9
+conda activate ConTEXTure
+```
+
+#### 1. Install required packages
 
 There is a basic list of packages to install. You can do so by installing from the requirements file:
 
 ```bash
 pip install -r requirements.txt
+pip install carvekit==4.1.2 --no-deps
 ```
 
-#### 2. Install PyTorch
+`carvekit` is also required to run the code. It needs to be installed separately using the `--no-deps` flag because it is overly strict regarding its required packages, some of which go in conflict with the packages we already use.
 
-ConTEXTure uses [Kaolin](https://kaolin.readthedocs.io/en/latest/index.html) and [torch-scatter](https://pytorch-scatter.readthedocs.io/en/latest/). It is necessary to check both packages to check the latest version of both packages and see which they support. [The Kaolin documentation provides a table](https://kaolin.readthedocs.io/en/latest/notes/installation.html#quick-start-linux-windows) showing which combinations of PyTorch and CUDA versions are supported by the library. Instructions on installing previous versions of PyTorch can be found [here](https://pytorch.org/get-started/previous-versions/).
-
-At the time of this writing, Kaolin is only supported up to PyTorch 2.1.1, which can be installed for a machine with CUDA 12.1 as follows:
-
-```bash
-pip install torch==2.1.1 torchvision==0.16.1 --index-url https://download.pytorch.org/whl/cu121
-```
-
-#### 3. Install Kaolin and torch-scatter
+#### 2. Install Kaolin and torch-scatter
 
 Instructions for installing Kaolin can be found [here](https://kaolin.readthedocs.io/en/latest/notes/installation.html). At the time of this writing, the latest version of Kaolin is 0.15.0, which can be installed as follows:
 
 ```bash
-pip install kaolin==0.15.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-{TORCH_VER}_cu{CUDA_VER}.html
+pip install kaolin==0.15.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.1_cu121.html
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.1.1+cu121.html
 ```
 
-TORCH_VER and CUDA_VER should be replaced with your PyTorch and CUDA versions.
+The cu121 in both links should be replaced with your CUDA version.
 
-#### Note about Huggingface
+#### 3. Add the Huggingface token
 
 Note that you also need a :hugs: token for StableDiffusion.
-First accept conditions for the model you want to use, default one
-is [`stabilityai/stable-diffusion-2-depth`]( https://huggingface.co/stabilityai/stable-diffusion-2-depth). Then, add a
-TOKEN file [access token](https://huggingface.co/settings/tokens) to the root folder of this project, or use
-the `huggingface-cli login` command
+First accept conditions for the [`stabilityai/stable-diffusion-2-depth`]( https://huggingface.co/stabilityai/stable-diffusion-2-depth) model. The [`huggingface-cli`](https://huggingface.co/docs/huggingface_hub/guides/cli) can be used to apply the token, which will allow the ConTEXTure model to be runnable.
+
+```bash
+pip install -U "huggingface_hub[cli]"
+huggingface-cli login
+```
 
 ## Running 🏃
 
