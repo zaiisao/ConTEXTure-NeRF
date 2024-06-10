@@ -12,8 +12,7 @@ tqdm
 einops
 opencv-python
 diffusers==0.27.2
-imageio
-torch-scatter
+imageio==2.9.0
+imageio-ffmpeg==0.4.2
 transformers
 omegaconf
-imageio[ffmpeg]

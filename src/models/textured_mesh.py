@@ -15,6 +15,7 @@ from .mesh import Mesh
 from .render import Renderer
 from src.configs.train_config import GuideConfig
 
+import torchvision
 
 def build_cotan_laplacian_torch(points_tensor: torch.Tensor, tris_tensor: torch.Tensor) -> np.ndarray:
     tris, points = tris_tensor.cpu().numpy(), points_tensor.cpu().numpy()
@@ -587,6 +588,22 @@ class TexturedMeshModel(nn.Module):
                 'foreground': pred_features, 'depth': depth, 'normals': normals, 'render_cache': render_cache,
                 'texture_map': texture_img}
     
+    def tensors_close(self,tensor1, tensor2, rtol=1e-05, atol=1e-08):
+        """
+        Compare two tensors to determine if they are close to each other.
+        
+        Parameters:
+        tensor1 (torch.Tensor): The first tensor to compare.
+        tensor2 (torch.Tensor): The second tensor to compare.
+        rtol (float): The relative tolerance parameter (default: 1e-05).
+        atol (float): The absolute tolerance parameter (default: 1e-08).
+        
+        Returns:
+        bool: True if all elements of tensor1 and tensor2 are close within the specified tolerance, False otherwise.
+        """
+        return torch.allclose(tensor1, tensor2, rtol=rtol, atol=atol)
+
+
     def render_batch(self, theta=None, phi=None, radius=None, background=None,
                use_meta_texture=False, render_cache=None, use_median=False, dims=None):
         if render_cache is None:
@@ -602,17 +619,33 @@ class TexturedMeshModel(nn.Module):
             augmented_vertices = self.augment_vertices()
         else:
             augmented_vertices = self.mesh.vertices
-
-        if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
-            diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
-                self.device)).abs().sum(axis=1)
-            default_mask = (diff < 0.1).float().unsqueeze(0)
-            median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
-                axis=1)  #MJ: get the median color of the non-magenta region of texture_img
-            texture_img = texture_img.clone()
-            with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
-                texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
-                
+        # texture_img1 = texture_img.clone()
+        
+        # texture_img2 = texture_img.clone()
+        
+        # if  not use_meta_texture: 
+        #     if not use_median: 
+        #         diff = (texture_img2 - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+        #             self.device)).abs().sum(axis=1)
+        #         default_mask = (diff < 0.1).float().unsqueeze(0)
+        #         median_color = texture_img2[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+        #             axis=1)  #MJ: get the median color of the non-magenta region of texture_img
+        #         print(f'num of magenta colors in texture_map={default_mask.sum()}; median_color={median_color}; num of median color={(1-default_mask).sum()}')
+                    
+        #     if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
+        #         diff = (texture_img2 - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+        #             self.device)).abs().sum(axis=1)
+        #         default_mask = (diff < 0.1).float().unsqueeze(0)
+        #         median_color = texture_img2[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+        #             axis=1)  #MJ: get the median color of the non-magenta region of texture_img
+        #         print(f'num of magenta colors={default_mask[default_mask==1].sum()}; median_color={median_color};  num of median color={ (1-default_mask).sum()}')
+        #         with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
+        #             texture_img2.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+        #             #Display the modified texture_img by replacing the default magent color with the mean of the learned texture map
+        #             torchvision.utils.save_image(texture_img1, f'./experiments/render_batch:texure_image(with default magenta).png')
+                    
+        #             torchvision.utils.save_image(texture_img2, f'./experiments/render_batch:texure_image(with default replaced by median).png')
+        #             print("texture_image1(magenta) vs texture_image 2(median): close?", self.tensors_close(texture_img1, texture_img2))    
         #MJ:  When rendering images, having large patches of a default or placeholder color (like magenta) 
         #  can be visually jarring and unrealistic. By filling these regions with a median color derived
         #  from the actual textured parts of the image, the overall appearance becomes more cohesive 
@@ -624,6 +657,24 @@ class TexturedMeshModel(nn.Module):
         # viewpoints, gaps can occur. This might be due to occlusions, insufficient viewpoint coverage,
         # or limitations in the image processing pipeline (e.g., alignment errors or inadequate resolution). 
         # In such cases,  some regions of the texture map may not receive any data, resulting in default color patches.     
+        
+        
+        if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
+                diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+                    self.device)).abs().sum(axis=1)
+                default_mask = (diff < 0.1).float().unsqueeze(0)
+                median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+                    axis=1)  #MJ: get the median color of the non-magenta region of texture_img
+                print(f'num of magenta colors={default_mask[default_mask==1].sum()}; median_color={median_color};  num of median color={ (1-default_mask).sum()}')
+                with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
+                    texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+                    # #Display the modified texture_img by replacing the default magent color with the mean of the learned texture map
+                    # torchvision.utils.save_image(texture_img1, f'./experiments/render_batch:texure_image(with default magenta).png')
+                    
+                    # torchvision.utils.save_image(texture_img2, f'./experiments/render_batch:texure_image(with default replaced by median).png')
+                    # print("texture_image1(magenta) vs texture_image 2(median): close?", self.tensors_close(texture_img1, texture_img2))    
+        
+        
         background_type = 'none'
         use_render_back = False
         if background is not None and type(background) == str: # JA: If background is a string, set it as the type
@@ -637,8 +688,8 @@ class TexturedMeshModel(nn.Module):
             augmented_vertices[None].repeat(batch_size, 1, 1),
             self.mesh.faces, # JA: the faces tensor can be shared across the batch and does not require its own batch dimension.
             self.face_attributes.repeat(batch_size, 1, 1, 1),
-           #MJ :texture_img.repeat(batch_size, 1, 1, 1),
-            texture_img.expand(batch_size, -1, -1, -1), #MJ: Note the use of -1 in .expand(), which tells PyTorch to keep the size of those dimensions as is (3, 1024, and 1024, respectively).
+            texture_img.repeat(batch_size, 1, 1, 1),
+            #MJ: texture_img.expand(batch_size, -1, -1, -1), #MJ: Note the use of -1 in .expand(), which tells PyTorch to keep the size of those dimensions as is (3, 1024, and 1024, respectively).
             elev=theta,
             azim=phi,
             radius=radius,

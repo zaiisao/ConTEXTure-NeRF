@@ -1093,7 +1093,9 @@ class TEXTure:
                                                       crop(generate_mask))
             self.log_train_image(F.interpolate(cropped_rgb_render, (512, 512)) * (1 - checker_mask),
                                  'checkerboard_input')
-        self.diffusion.use_inpaint = self.cfg.guide.use_inpainting and self.paint_step > 1
+        #MJ: Apply in-painting to the front view  
+        self.diffusion.use_inpaint = self.cfg.guide.use_inpainting   
+        #MJ: self.diffusion.use_inpaint = self.cfg.guide.use_inpainting and self.paint_step > 1
         # JA: self.zero123_front_input has been added for Zero123 integration
         if self.zero123_front_input is None:
             resized_zero123_front_input = None
