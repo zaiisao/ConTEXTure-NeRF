@@ -174,7 +174,10 @@ class Renderer:
         elif background_type == 'random':
             image_features += torch.rand((1,1,1,3)).to(self.device) * (1 - mask)
 
-        normals_image = face_normals[0][face_idx, :]
+        normals_image = face_normals[0][face_idx, :] #MJ: what happens when face_idx[0,i,j] is -1 (non-face, background)?
+        #MJ: an index of -1 refers to the last element in the array, but in this context, it is meant to indicate an invalid index.
+
+
 
         render_cache = {'uv_features':uv_features, 'face_normals':face_normals,'face_idx':face_idx, 'depth_map':depth_map}
 
@@ -207,7 +210,7 @@ class Renderer:
             # logger.info('Using render cache')
             face_normals, uv_features, face_idx, depth_map = render_cache['face_normals'], render_cache['uv_features'], render_cache['face_idx'], render_cache['depth_map']
         mask = (face_idx > -1).float()[..., None]
-
+        #MJ: uv_features: shape =(7,1200,1200,2); texture_map:shape = (7,3,1200,1200)
         image_features = kal.render.mesh.texture_mapping(uv_features, texture_map, mode=self.interpolation_mode)
                         # JA: Interpolates texture_maps by dense or sparse texture_coordinates (uv_features).
                         # This function supports sampling texture coordinates for:

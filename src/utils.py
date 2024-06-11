@@ -259,7 +259,24 @@ def color_with_shade(color: List[float], z_normals: torch.Tensor, light_coef=0.7
     shaded_color = torch.tensor(color).view(1, 3, 1, 1).to(
         z_normals.device) * normals_with_light
     return shaded_color
-
+#MJ:
+# The detach() method is used to create a tensor that shares storage with z_normals
+# but without tracking operations for gradient computation, meaning it is treated as a constant in this context.
+# The calculation essentially scales the z_normals by a factor (1 - light_coef) and adds light_coef to it,
+# modulating the normal values based on the light coefficient.
+#If I  use z_normals rather than z_normals.detach(): 
+#(1) Computation Graph: The computation graph will include additional nodes for the operations (1 - light_coef) * z_normals and the addition with light_coef. 
+# This makes the graph more complex and larger, potentially increasing memory usage during training.
+# (2) Training Dynamics:
+# If the shading effect is not intended to affect the gradients and training dynamics, 
+# not using .detach() might unintentionally allow the shading effect to influence the gradients. 
+# This could lead to unintended consequences in the optimization process, as the gradients could propagate through the shading operation,
+# potentially affecting the learning process in ways that are not desired.
+#(3) BUT:
+# If shaded_color and, consequently, normals_with_light are not part of the computation graph that influences the loss,
+# the gradients will not be computed for these operations during backpropagation. This means that whether z_normals is detached or not,
+# it will not affect the gradient computation since these operations do not participate in the loss calculation
+# (4) In sum: The detachment is only significant when the operations involving z_normals are part of the loss computation graph.
 def pad_tensor_to_size(input_tensor, target_height, target_width, value=1):
     # Get the current dimensions of the tensor
     current_height, current_width = input_tensor.shape[-2], input_tensor.shape[-1]
