@@ -1,5 +1,5 @@
 log:
-  exp_name: napoleon_-10_v3
+  exp_name: napoleon_-100
 guide:
   text: "A photo of Napoleon Bonaparte"
   shape_path: shapes/napoleon.obj
@@ -8,4 +8,4 @@ guide:
 optim:
   seed: 100
   learn_max_z_normals: True
-  alpha: -10
+  alpha: -100

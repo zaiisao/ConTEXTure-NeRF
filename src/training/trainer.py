@@ -351,10 +351,11 @@ class TEXTure:
                                                     background=torch.Tensor([0, 0, 0]).to(self.device),
                                                     use_meta_texture=True, render_cache=None)
             z_normals = meta_outputs["normals"][:,2:3,:,:].clamp(0, 1)
-            max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1) 
+            max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1)
+            object_mask = meta_outputs["mask"]
 
             #MJ: max_z_normals refers to the projection of self.meta_texture_img, which is a leaf tensor (parameter tensor)
-            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
+            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, object_mask, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
             # self.view_weights is a function of self.meta_texture_img; When self.view_weights is used to compute a loss
             # self.view_weights.detach() should be used to avoid an error of re-using the freed computational graph
     
@@ -577,106 +578,6 @@ class TEXTure:
 
         self.should_inpaint = True
 
-        @torch.enable_grad
-        # def on_step_end(pipeline, iter, t, callback_kwargs):
-            # grid_latent = callback_kwargs["latents"] # JA: grid_latent is z_{t-1}, that is, z_{t_prev}
-
-            # is_inpaint_iter = iter >= 10 and iter < 20 and iter % 2 == 1 and self.should_inpaint
-
-            # if t == pipeline.scheduler.timesteps[-1]: # JA: If t is equal to the last time point, which is 0
-            #     # JA: At this moment when on_step_end is called, latent is equal to z_{t-1} (z_{iter + 1})
-            #     noised_cropped_rgb_renders_grid = gt_renders_latent_allviews
-            # elif is_inpaint_iter:
-            #     grid_latent = self.previous_grid_latent
-
-            #     # JA: At every iteration, pipeline.scheduler.step is called which increments the _step_index
-            #     # value by 1. Since this ad-hoc approach allows denoising in every step but we end up discarding
-            #     # the denoised latents when the iteration is an odd number and between 10 and 20, we are
-            #     # technically calling pipeline.scheduler.step twice on each of these iteration steps. This
-            #     # requires us to manually decrement the _step_index value to undo the incrementation done for
-            #     # the discarded denoised latent.
-            #     pipeline.scheduler._step_index -= 1
-
-            #     masked_latents = gt_renders_latent_allviews * (masks_grid >= 0.5) + 0.5 * (masks_grid >= 0.5)
-
-            #     latent_model_input_inpaint = torch.cat(
-            #         [torch.cat([grid_latent, masks_grid, masked_latents], dim=1)] * 2
-            #     ).half()
-
-            #     with torch.no_grad():
-            #         noise_pred_inpaint = self.diffusion.inpaint_unet(
-            #             latent_model_input_inpaint,
-            #             pipeline.scheduler.timesteps[iter + 1][None],
-
-            #             # JA: Assuming append_direction is set to True, this will (erroneously) append the text embedding
-            #             # that corresponds to the front view (i.e. the text embedding like "a picture of spiderman, front
-            #             # view"). Since the grid shows images from more angles than the front, the text embedding should
-            #             # not specify a direction (e.g. "a picture of spiderman").
-            #             encoder_hidden_states=self.text_z[0].half()
-            #         )['sample']
-            #         noise_pred = noise_pred_inpaint
-
-            #     # JA: The guidance_scale config value is a leftover characteristic of the TEXTure code. It refers to the
-            #     # guidance scale used in the interleaved depth and inpainting pipelines of TEXTure. This is not to be
-            #     # confused with pipeline.guidance_scale, which is the guidance scale of the Zero123++ pipeline.
-            #     guidance_scale = self.cfg.guide.guidance_scale
-
-            #     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            #     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            #     latents = pipeline.scheduler.step(
-            #         noise_pred,
-            #         pipeline.scheduler.timesteps[iter + 1][None],
-            #         grid_latent
-            #     )['prev_sample']
-
-            #     # latents = self.diffusion.encode_imgs(cropped_rgb_renders_grid)
-            #     noises_latent = torch.randn_like(grid_latent)
-            #     noised_cropped_rgb_renders_grid = pipeline.scheduler.add_noise(
-            #         latents,
-            #         noises_latent,
-            #         pipeline.scheduler.timesteps[iter + 1][None]
-            #     )
-            # else:
-            #     # MJ: Noisify the GT rendered image at the same noise level as the latent  in the latent space
-            #     noises_latent = torch.randn_like(grid_latent)
-            #     noised_cropped_rgb_renders_grid = pipeline.scheduler.add_noise(
-            #         gt_renders_latent_allviews,
-            #         noises_latent,
-            #         pipeline.scheduler.timesteps[iter + 1][None]
-            #     )
-
-            # #MJ: In TEXTure, the latent image generated by the text-to-image pipeline from a given viewpoint
-            # # is blended/inpainted with the image rendered from the mesh from that viewpoint using the currently learned 
-            # # texture atlas. This blended latent is used as the input to the next step of denoising.
-            # # This enforces the generated image to align with the correct image rendered using the correct part of the 
-            # # texture atlas corresponding to the front viewpoint.  The texture atlas is partly learned from the front view image.
-            # # 
-            # # In a new viewpoint, when the image rendered using the partly learned texture atlas 
-            # # may contain the part which is rendered from the part of the texture atlas with the
-            # # initial magenta color. If so, it means that for this part, the image should be generated by the generation
-            # # pipeline. That is, if the newly rendered image is not different from the default texture color, 
-            # # it is taken to mean that the new region should be painted by the generated image.isidentifier()
-            # # But, the new region should be well-aligned with the part that is already valid; This part is
-            # # considered as the background in the context of inpainting.
-            # if not is_inpaint_iter:
-            #     blended_grid_latent = (grid_latent * masks_grid + noised_cropped_rgb_renders_grid * (1 - masks_grid))
-            #     callback_kwargs["latents"] = blended_grid_latent.half()
-            # else:
-            #     callback_kwargs["latents"] = grid_latent
-
-            # # callback_kwargs["latents"] = blended_grid_latent.half()
-
-            # self.previous_grid_latent = callback_kwargs["latents"].clone()
-
-            # return callback_kwargs
-        def on_step_end(pipeline, iter, t, callback_kwargs):
-            print(iter)
-            return callback_kwargs
-
-        #End  def on_step_end(pipeline, i, t, callback_kwargs) 
-        # JA: Here we call the Zero123++ pipeline
-
         zero123_start_time = time.perf_counter()  # Record the end time
 
         masked_input_latents = gt_renders_latent_grid * (masks_grid < 0.5) + 0.5 * (masks_grid >= 0.5)
@@ -692,8 +593,7 @@ class TEXTure:
             use_blending=False,
             latent_mask_grid=masks_grid.half(),
             latent_renders_grid=gt_renders_latent_grid,
-            masked_input_latents=masked_input_latents.half(),
-            callback_on_step_end=on_step_end
+            masked_input_latents=masked_input_latents.half()
         ).images[0]
         #MJ: return image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
@@ -1584,11 +1484,11 @@ class TEXTure:
                                 # to the trainable parameters of the network, that is, the pixel value of the
                                 # texture atlas
                 optimizer.step()
-                pbar.set_description(f"zero123plus: Fitting mesh colors -Epoch {iter}, Loss: {total_loss.item():.7f}")
+                pbar.set_description(f"project_back_max_z_normals: -Epoch {iter}, Loss: {total_loss.item():.7f}")
         #End for _ in tqdm(range(300), desc='fitting max_z_normals')
                 
          
-    def compute_view_weights(self, z_normals, max_z_normals, alpha=-10.0 ):        
+    def compute_view_weights(self, z_normals, max_z_normals, object_mask, alpha=-10.0 ):        
         
         """
         Compute view weights where the weight increases exponentially as z_normals approach max_z_normals.
@@ -1605,16 +1505,27 @@ class TEXTure:
         assert z_normals.shape == max_z_normals.shape, "Input tensors must have the same shape"
         
         # Compute the difference between max_z_normals and z_normals
-        delta = max_z_normals - z_normals
-        # for i in range( delta.shape[0]):
-        #     print(f'min delta for view-{i}:{delta[i].min()}')
-        #     print(f'max  delta for view-{i}:{delta[i].max()}')
+        delta = (max_z_normals - z_normals) * object_mask # max_z_normals[v] should be greater than z_normals[v] for each viewpoint v
+        for i in range( z_normals.shape[0]):
+            self.log_train_image(torch.cat((z_normals[i], z_normals[i], z_normals[i]))[None] * object_mask[i][None], f"z_normals_{i}")
+            self.log_train_image(torch.cat((max_z_normals[i], max_z_normals[i], max_z_normals[i]))[None] * object_mask[i][None], f"max_z_normals_{i}")
+
+        for i in range( delta.shape[0]):
+            self.log_train_image(torch.cat((
+                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min()),
+                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min()),
+                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min())
+            ))[None], f"delta_{i}")
+            print(f'min delta for view-{i}:{delta[i].min()}')
+            print(f'max delta for view-{i}:{delta[i].max()}')
         #MJ: delta is supposed to be greater than 0; But sometimes, z_normals is greater than max_z_normals.
         # It means that project_back_max_z_normals() was not fully successful.
-        # abs_delta = torch.abs( delta )
+        abs_delta = torch.abs( delta )
         # Calculate the weights using an exponential function, multiplying by negative alpha
-        weights = torch.exp(alpha * delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
-        
+        weights = torch.exp(alpha * abs_delta)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
+        # If z_normals[v, 0, i, j] is greater than max_z_normals[v, 0, i, j], we will consider that
+        # z_normals[v, 0, i, j] will dominate the z-normals of other views. Therefore we will give the weight 1 to that
+        # z_normals[v, 0, i, j].
         #debug: for i in range( weights.shape[0]):
         #     print(f'min weights  for view-{i}:{weights[i].min()}')
         #     print(f'max  weights for view-{i}:{weights[i].max()}')
