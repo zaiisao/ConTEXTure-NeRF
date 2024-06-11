@@ -352,10 +352,9 @@ class TEXTure:
                                                     use_meta_texture=True, render_cache=None)
             z_normals = meta_outputs["normals"][:,2:3,:,:].clamp(0, 1)
             max_z_normals = meta_outputs['image'][:,0:1,:,:].clamp(0, 1)
-            object_mask = meta_outputs["mask"]
 
             #MJ: max_z_normals refers to the projection of self.meta_texture_img, which is a leaf tensor (parameter tensor)
-            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, object_mask, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
+            self.view_weights = self.compute_view_weights(z_normals, max_z_normals, alpha=self.cfg.optim.alpha) #MJ: = -50 , -100, -10000
             # self.view_weights is a function of self.meta_texture_img; When self.view_weights is used to compute a loss
             # self.view_weights.detach() should be used to avoid an error of re-using the freed computational graph
     
@@ -1462,7 +1461,7 @@ class TEXTure:
         #End for _ in tqdm(range(300), desc='fitting max_z_normals')
                 
          
-    def compute_view_weights(self, z_normals, max_z_normals, object_mask, alpha=-10.0 ):        
+    def compute_view_weights(self, z_normals, max_z_normals, alpha=-10.0 ):        
         
         """
         Compute view weights where the weight increases exponentially as z_normals approach max_z_normals.
@@ -1479,24 +1478,10 @@ class TEXTure:
         assert z_normals.shape == max_z_normals.shape, "Input tensors must have the same shape"
         
         # Compute the difference between max_z_normals and z_normals
-        delta = (max_z_normals - z_normals) * object_mask # max_z_normals[v] should be greater than z_normals[v] for each viewpoint v
-        for i in range( z_normals.shape[0]):
-            self.log_train_image(torch.cat((z_normals[i], z_normals[i], z_normals[i]))[None] * object_mask[i][None], f"z_normals_{i}")
-            self.log_train_image(torch.cat((max_z_normals[i], max_z_normals[i], max_z_normals[i]))[None] * object_mask[i][None], f"max_z_normals_{i}")
-
-        for i in range( delta.shape[0]):
-            self.log_train_image(torch.cat((
-                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min()),
-                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min()),
-                (delta[i] - delta[i].min()) / (delta[i].max() - delta[i].min())
-            ))[None], f"delta_{i}")
-            print(f'min delta for view-{i}:{delta[i].min()}')
-            print(f'max delta for view-{i}:{delta[i].max()}')
-        #MJ: delta is supposed to be greater than 0; But sometimes, z_normals is greater than max_z_normals.
-        # It means that project_back_max_z_normals() was not fully successful.
+        delta = max_z_normals - z_normals # max_z_normals[v] should be greater than z_normals[v] for each viewpoint v
 
         max_z_normals = torch.where( delta >=0, max_z_normals, z_normals)
-        delta_new = (max_z_normals - z_normals) * object_mask
+        delta_new = max_z_normals - z_normals
         # Calculate the weights using an exponential function, multiplying by negative alpha
         weights = torch.exp(alpha * delta_new)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
 
