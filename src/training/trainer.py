@@ -1496,7 +1496,7 @@ class TEXTure:
         # It means that project_back_max_z_normals() was not fully successful.
 
         max_z_normals = torch.where( delta >=0, max_z_normals, z_normals)
-        delta_new = max_z_normals - z_normals
+        delta_new = (max_z_normals - z_normals) * object_mask
         # Calculate the weights using an exponential function, multiplying by negative alpha
         weights = torch.exp(alpha * delta_new)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
 
