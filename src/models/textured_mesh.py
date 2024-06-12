@@ -663,7 +663,7 @@ class TexturedMeshModel(nn.Module):
                 diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
                     self.device)).abs().sum(axis=1)
                 default_mask = (diff < 0.1).float().unsqueeze(0)
-                median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+                median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean( #MJ: if texture_img=magenta default in this stage, median_color=(nan,nan,nan)
                     axis=1)  #MJ: get the median color of the non-magenta region of texture_img
                 print(f'num of magenta colors={default_mask[default_mask==1].sum()}; median_color={median_color};  num of median color={ (1-default_mask).sum()}')
                 with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color

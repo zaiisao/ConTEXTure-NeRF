@@ -98,6 +98,8 @@ class OptimConfig:
     #MJ: added by MJ
     learn_max_z_normals: bool = True
     alpha:               float = -100
+    front_view_weight:  float = 10.0
+    project_back_front:  bool = True
 
 @dataclass
 class LogConfig:

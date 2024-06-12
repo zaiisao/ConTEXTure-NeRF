@@ -323,14 +323,14 @@ class StableDiffusion(nn.Module):
                     mask_constraints_iters = True  # i < 20
                     is_inpaint_iter = is_inpaint_range  # and i %2 == 1
 
-                    if not is_inpaint_range and mask_constraints_iters:
-                        if update_mask is not None:
-                            noised_truth = self.scheduler.add_noise(gt_latents, noise, t)
-                            if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
-                                curr_mask = check_mask
-                            else:
-                                curr_mask = update_mask
-                            latents = latents * curr_mask + noised_truth * (1 - curr_mask)
+                    # if not is_inpaint_range and mask_constraints_iters:
+                    #     if update_mask is not None:
+                    #         noised_truth = self.scheduler.add_noise(gt_latents, noise, t)
+                    #         if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
+                    #             curr_mask = check_mask
+                    #         else:
+                    #             curr_mask = update_mask
+                    #         latents = latents * curr_mask + noised_truth * (1 - curr_mask)
 
                     # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
                     latent_model_input = torch.cat([latents] * 2)
