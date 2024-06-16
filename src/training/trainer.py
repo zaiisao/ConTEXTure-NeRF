@@ -591,7 +591,7 @@ class TEXTure:
             num_inference_steps=50,
 
             use_inpaint=False,
-            use_blending=False,
+            use_blending=True,
             latent_mask_grid=masks_grid.half(),
             latent_renders_grid=gt_renders_latent_grid,
             masked_input_latents=masked_input_latents.half()
