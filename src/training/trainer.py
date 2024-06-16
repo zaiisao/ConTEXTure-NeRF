@@ -586,7 +586,7 @@ class TEXTure:
         #MJ: Generate a 3x2 grid image conditioned on the front view image and the 6 depth maps of the mesh
         result = self.zero123plus(
             cond_image,
-            prompt=self.text_string[0],
+            prompt="",#self.text_string[0],
             depth_image=depth_image,
             num_inference_steps=50,
 
