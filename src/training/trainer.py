@@ -48,7 +48,7 @@ def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
 
-class TEXTure:
+class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.paint_step = 0
@@ -1492,6 +1492,10 @@ class TEXTure:
                 optimizer.step()
 
                 pbar.set_description(f"project_max_z_normals: Fitting z_normals -Epoch {iter}, Loss: {total_loss.item():.7f}")
+
+                if total_loss == 0:
+                    print(f"max_z_normals training reached 0 loss at epoch {iter}")
+                    break
         #End for _ in tqdm(range(300), desc='fitting max_z_normals')
                 
          

@@ -1,18 +1,12 @@
 import pyrallis
-import sys
-import os
-
-# print(os.getcwd())
-sys.path.append("./src/zero123/zero123")
-sys.path.append("./src/zero123/ControlNet")
 
 from src.configs.train_config import TrainConfig
-from src.training.trainer import TEXTure
+from src.training.trainer import ConTEXTure
 
 
 @pyrallis.wrap()
 def main(cfg: TrainConfig):
-    trainer = TEXTure(cfg)
+    trainer = ConTEXTure(cfg)
     if cfg.log.eval_only:
         trainer.full_eval()
     else:
@@ -20,5 +14,4 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == '__main__':
-    
     main()

@@ -1,4 +1,4 @@
-# TEXTure: Text-Guided Texturing of 3D Shapes
+# ConTEXTure: Consistent Multiview Images to Texture
 
 ## [[Project Page - Coming Soon]](https://google.com/)
 

@@ -24,7 +24,7 @@ import pyrallis
 # sys.path.append("./src/zero123/zero123")
 # sys.path.append("./src/zero123/ControlNet")
 
-from src.training.trainer import TEXTure
+from src.training.trainer import ConTEXTure
 from src.configs.train_config import TrainConfig
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid
 
@@ -288,7 +288,7 @@ guide:
 
         @pyrallis.wrap(config_path=fp.name)
         def main(cfg: TrainConfig):
-            trainer = TEXTure(cfg)
+            trainer = ConTEXTure(cfg)
             background = torch.Tensor([1, 1, 1]).to(trainer.device)
 
             renders = []

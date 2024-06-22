@@ -2,7 +2,7 @@ import sys
 import tempfile
 import pyrallis
 
-from src.training.trainer import TEXTure
+from src.training.trainer import ConTEXTure
 from src.configs.train_config import TrainConfig
 
 sys.path.append("./src/zero123/zero123")
@@ -27,7 +27,7 @@ guide:
 
       @pyrallis.wrap(config_path=fp.name)
       def main(cfg: TrainConfig):
-        trainer = TEXTure(cfg)
+        trainer = ConTEXTure(cfg)
         if cfg.log.eval_only:
           trainer.full_eval()
         else:

@@ -44,7 +44,7 @@ def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
 
-class TEXTure:
+class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
         self.paint_step = 0

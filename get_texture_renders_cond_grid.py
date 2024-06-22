@@ -21,12 +21,10 @@ from diffusers import DiffusionPipeline
 import math
 import tempfile
 import pyrallis
-# from diffusers import StableDiffusionDepth2ImgPipeline
 
-sys.path.append("./src/zero123/zero123")
 sys.path.append("./src/zero123/ControlNet")
 
-from src.training.trainer import TEXTure
+from src.training.trainer import ConTEXTure
 from src.configs.train_config import TrainConfig
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid
 
@@ -191,7 +189,7 @@ optim:
 
             @pyrallis.wrap(config_path=fp.name)
             def main(cfg: TrainConfig):
-                trainer = TEXTure(cfg)
+                trainer = ConTEXTure(cfg)
                 
                 if cfg.log.eval_only:
                     trainer.full_eval()

@@ -17,7 +17,7 @@ import tempfile
 import pyrallis
 # from diffusers import StableDiffusionDepth2ImgPipeline
 
-from src.training.trainer import TEXTure
+from src.training.trainer import ConTEXTure
 from src.configs.train_config import TrainConfig
 
 torch.set_grad_enabled(False)
@@ -427,7 +427,7 @@ guide:
 
         @pyrallis.wrap(config_path=fp.name)
         def main(cfg: TrainConfig):
-            trainer = TEXTure(cfg)
+            trainer = ConTEXTure(cfg)
             background = torch.Tensor([1, 1, 1]).to(trainer.device)
 
             renders = []
