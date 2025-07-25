@@ -23,7 +23,6 @@ import torchvision
 import os
 
 from omegaconf import OmegaConf
-from .zero123.zero123.ldm.util import instantiate_from_config
 
 class StableDiffusion(nn.Module):
     def __init__(self, device, model_name='CompVis/stable-diffusion-v1-4', concept_name=None, concept_path=None,
@@ -77,6 +76,7 @@ class StableDiffusion(nn.Module):
         if self.second_model_type == "control_zero123":
             self.second_model = self.init_zero123(control=True)
         elif self.second_model_type == "zero123":
+            from .zero123.zero123.ldm.util import instantiate_from_config
             self.second_model = self.init_zero123(control=False)
         elif self.second_model_type == "zero123plus":
             self.zero123plus = DiffusionPipeline.from_pretrained(
