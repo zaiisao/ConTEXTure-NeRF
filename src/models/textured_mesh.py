@@ -97,6 +97,8 @@ def choose_multi_modal(n: int, k: int):
 class TexturedMeshModel(nn.Module):
     def __init__(self,
                  opt: GuideConfig,
+                 texture_mlp: nn.Module,
+                 uv_embedder: nn.Module,
                  render_grid_size=1024,
                  texture_resolution=1024,
                  initial_texture_path=None,
@@ -127,15 +129,18 @@ class TexturedMeshModel(nn.Module):
                                  interpolation_mode=self.opt.texture_interpolation_mode, fovyangle=fovyangle)
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
-        self.background_sphere_colors, self.texture_img = self.init_paint() # JA: self.texture_img is a learnable parameter
-        self.meta_texture_img = nn.Parameter(torch.zeros_like(self.texture_img)) # JA: self.texture_img is the texture atlas
-                                # define self.meta_texture_img variable to be the parameter of the neural network whose init
-                                # value is set to a zero tensor
+        self.background_sphere_colors, _ = self.init_paint() # JA: self.texture_img is a learnable parameter
+
+        self.texture_mlp = texture_mlp
+        self.uv_embedder = uv_embedder
+
         if self.opt.reference_texture: # JA: This value is None by default
             base_texture = torch.Tensor(np.array(Image.open(self.opt.reference_texture).resize(
                 (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
             change_mask = (
-                    (base_texture.to(self.device) - self.texture_img).abs().sum(axis=1) > 0.1).float()
+                    # (base_texture.to(self.device) - self.texture_img).abs().sum(axis=1) > 0.1).float()
+                    (base_texture.to(self.device) - self.get_texture_map()).abs().sum(axis=1) > 0.1).float()
+
             with torch.no_grad():
                 self.meta_texture_img[:, 1] = change_mask
         self.vt, self.ft = self.init_texture_map()
@@ -257,6 +262,18 @@ class TexturedMeshModel(nn.Module):
         with torch.no_grad():
             self.meta_texture_img[:] = 0
 
+    def get_texture_map(self) -> torch.Tensor:
+        res = self.texture_resolution
+        uv_coords_flat = torch.stack(torch.meshgrid(
+            torch.linspace(0, 1, res, device=self.device), 
+            torch.linspace(0, 1, res, device=self.device), 
+            indexing='xy'), dim=-1).reshape(-1, 2)
+        
+        embedded_uvs = self.uv_embedder(uv_coords_flat)
+        texture_colors = self.texture_mlp(embedded_uvs)
+        
+        return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2)
+
     def init_paint(self, num_backgrounds=1):
         # random color face attributes for background sphere
         init_background_bases = torch.rand(num_backgrounds, 3).to(self.device)
@@ -271,7 +288,8 @@ class TexturedMeshModel(nn.Module):
         else: # JA: This is the case in our experiment
             texture = torch.ones(1, 3, self.texture_resolution, self.texture_resolution).cuda() * torch.Tensor(
                 self.default_color).reshape(1, 3, 1, 1).cuda()
-        texture_img = nn.Parameter(texture)
+        # texture_img = nn.Parameter(texture) # JA: In the NeRF version, texture_img is retrieved with get_texture_map
+        texture_img = None
         return background_sphere_colors, texture_img
 
     def invert_color(self, color: torch.Tensor) -> torch.Tensor:
@@ -288,12 +306,13 @@ class TexturedMeshModel(nn.Module):
         return init_color_in_latent
 
     def change_default_to_median(self):
-        diff = (self.texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+        texture_img = self.get_texture_map()
+        diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
             self.device)).abs().sum(axis=1)
         default_mask = (diff < 0.1).float().unsqueeze(0)
-        median_color = self.texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(axis=1)
+        median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(axis=1)
         with torch.no_grad():
-            self.texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+            texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
 
     def init_texture_map(self):
         cache_path = self.cache_path
@@ -337,14 +356,7 @@ class TexturedMeshModel(nn.Module):
         raise NotImplementedError
 
     def get_params_texture_atlas(self):
-        # return [self.background_sphere_colors, self.texture_img, self.meta_texture_img]
-        return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
-                                                            # are not used as parameters of the loss function
-
-    def get_params_max_z_normals(self):
-         return [self.meta_texture_img]
-        # return [self.texture_img]    # JA: In our experiment, self.background_sphere_colors
-                                                            # are not used as parameters of the loss function
+        return list(self.texture_mlp.parameters())
 
     @torch.no_grad()
     def export_mesh(self, path):
@@ -356,7 +368,8 @@ class TexturedMeshModel(nn.Module):
         v_np = v.cpu().numpy()  # [N, 3]
         f_np = f.cpu().numpy()  # [M, 3]
 
-        colors = self.texture_img.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
+        texture_img = self.get_texture_map()
+        colors = texture_img.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
 
         colors = colors[0].cpu().detach().numpy()
         colors = (colors * 255).astype(np.uint8)
@@ -432,7 +445,7 @@ class TexturedMeshModel(nn.Module):
 
         background_sphere_colors = self.background_sphere_colors[
             torch.randint(0, self.background_sphere_colors.shape[0], (batch_size,))]
-        texture_img = self.meta_texture_img if use_meta_texture else self.texture_img
+        texture_img = self.get_texture_map() #self.meta_texture_img if use_meta_texture else self.texture_img
 
         if self.augmentations:
             augmented_vertices = self.augment_vertices()

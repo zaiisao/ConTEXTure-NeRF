@@ -259,7 +259,8 @@ class ConTEXTure:
         fovyangle = np.pi / 3
         cache_path = Path('cache') / Path(self.cfg.guide.shape_path).stem
         cache_path.mkdir(parents=True, exist_ok=True)
-        model = TexturedMeshModel(self.cfg.guide, device=self.device,
+        model = TexturedMeshModel(self.cfg.guide,
+                                  device=self.device,
                                   render_grid_size=self.cfg.render.train_grid_size,
                                   cache_path=cache_path,
                                   texture_resolution=self.cfg.guide.texture_resolution,

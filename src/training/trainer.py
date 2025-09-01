@@ -68,8 +68,18 @@ class ConTEXTure:
         self.init_logger()
         pyrallis.dump(self.cfg, (self.exp_path / 'config.yaml').open('w'))
 
+        # JA: From run_nerf_helpers.py
+        # The positional embedder for 2D UV coordinates
+        self.uv_embedder, input_ch_uv = get_embedder(multires=8) 
+
+        # The 2D NeRF model, with input dimensions matching the embedder's output
+        self.texture_mlp = NeRF(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
+        if torch.cuda.device_count() > 1:
+            self.texture_mlp = nn.DataParallel(self.texture_mlp)
+
+        # You should also pass these new components to your mesh model
         self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
-        self.mesh_model = self.init_mesh_model()
+        self.mesh_model = self.init_mesh_model(texture_mlp=self.texture_mlp, uv_embedder=self.uv_embedder)
         self.diffusion = self.init_diffusion()
 
         if self.cfg.guide.use_zero123plus:
@@ -178,19 +188,17 @@ class ConTEXTure:
         # contribute to the texture atlas.
         weight_masks[views, 0, i_coords, j_coords] = ~(unworthy_pixels_mask)
 
-        # weight_masks[views[0], 0, i_coords[0], j_coords[0]] = ~(unworthy_pixels_mask[0])
-        # weight_masks[views[1], 0, i_coords[1], j_coords[1]] = ~(unworthy_pixels_mask[1])
-        # weight_masks[views[2], 0, i_coords[2], j_coords[2]] = ~(unworthy_pixels_mask[2])
-        # weight_masks[views[3], 0, i_coords[3], j_coords[2]] = ~(unworthy_pixels_mask[3])
-
         return weight_masks
 
-    def init_mesh_model(self) -> nn.Module:
+    def init_mesh_model(self, texture_mlp, uv_embedder) -> nn.Module:
         # fovyangle = np.pi / 6 if self.cfg.guide.use_zero123plus else np.pi / 3
         fovyangle = np.pi / 3
         cache_path = Path('cache') / Path(self.cfg.guide.shape_path).stem
         cache_path.mkdir(parents=True, exist_ok=True)
-        model = TexturedMeshModel(self.cfg.guide, device=self.device,
+        model = TexturedMeshModel(self.cfg.guide,
+                                  texture_mlp=texture_mlp,
+                                  uv_embedder=uv_embedder,
+                                  device=self.device,
                                   render_grid_size=self.cfg.render.train_grid_size,
                                   cache_path=cache_path,
                                   texture_resolution=self.cfg.guide.texture_resolution,
@@ -406,7 +414,7 @@ class ConTEXTure:
 
         # --- 2. SETUP SDS LOOP ---
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=0.01, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -442,7 +450,7 @@ class ConTEXTure:
             # Prepare depth map tensor
             depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil).to(device=self.device, dtype=unet.dtype)
 
-        sds_steps = 3000
+        sds_steps = 50000
         scheduler.set_timesteps(sds_steps, device=self.device)
         timesteps = scheduler.timesteps
 
@@ -512,17 +520,28 @@ class ConTEXTure:
                 
                 # Perform guidance
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + 4 * (noise_pred_text - noise_pred_uncond)
+                guidance_scale = 4
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # --- Calculate SDS Loss Gradient ---
                 w = (1 - scheduler.alphas_cumprod[t.cpu().long()]).to(self.device)
                 grad = w * (noise_pred - noise)
+
+                loss = (grad * scaled_latents_clean).mean()
+                current_loss = loss.item()
                 
                 # --- Backpropagate the gradient to the texture map ---
-                scaled_latents_clean.backward(gradient=grad, retain_graph=True)
+                scaled_latents_clean.backward(gradient=grad)
+                grad_magnitude = grad.norm().item()
+                loss_for_logging = torch.nn.functional.mse_loss(noise_pred, noise, reduction='mean').item()
                 
                 # --- Update Texture Map ---
                 optimizer.step()
+
+                if i % 1000 == 0 and i > 0:
+                    self.log_texture_map(i)
+
+                pbar.set_description(f"SDS Texture Optimization: Iter {i}, Loss: {loss_for_logging:.4f}")
                 pbar.update(1)
 
 # --- 3. DIAGNOSTIC TEST: Standard Denoising Loop ---
@@ -1102,3 +1121,30 @@ class ConTEXTure:
             Image.fromarray(
                 (einops.rearrange(tensor, '(1) c h w -> h w c').detach().cpu().numpy() * 255).astype(np.uint8)).save(
                 path)
+
+    def log_texture_map(self, iter: int):
+        """
+        Generates and saves the current texture map from the 2D NeRF model.
+        """
+        # Put model in evaluation mode to ensure no gradients are computed
+        self.mesh_model.eval()
+
+        # Get the texture map from the 2D NeRF
+        with torch.no_grad():
+            texture_tensor = self.mesh_model.get_texture_map()
+            
+        # [cite_start]Convert tensor to a NumPy array in the HWC format [cite: 399]
+        # The get_texture_map() returns (1, 3, H, W)
+        texture_np = einops.rearrange(texture_tensor, 'b c h w -> b h w c')[0].cpu().numpy()
+        
+        # Scale values to 0-255 and convert to uint8
+        texture_np = (texture_np * 255).astype(np.uint8)
+
+        # Save the image to the specified path
+        save_path = self.train_renders_path / f'texture_map_iter_{iter:06d}.png'
+        Image.fromarray(texture_np).save(save_path)
+        
+        # Restore model to training mode
+        self.mesh_model.train()
+
+        logger.info(f"Saved texture map to {save_path}")
