@@ -29,6 +29,7 @@ from src.models.textured_mesh import TexturedMeshModel
 from src.stable_diffusion_depth import StableDiffusion
 from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, MultiviewDataset
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid
+from src.run_nerf_helpers import *
 
 from PIL import Image, ImageDraw
 # JA: scale_latents, unscale_latents, scale_image, and unscale_image are from the Zero123++ pipeline code:
@@ -291,12 +292,7 @@ class ConTEXTure:
         logger.add(self.exp_path / 'log.txt', colorize=False, format=log_format)
 
     def paint(self):
-        if self.cfg.guide.use_zero123plus:
-                        
-            self.paint_zero123plus()
-           
-        else:
-            self.paint_legacy()
+        self.paint_zero123plus()
 
     def define_view_weights(self):
         # Set the camera poses:
@@ -584,39 +580,6 @@ class ConTEXTure:
         self.mesh_model.change_default_to_median()
         logger.info('Finished SDS Painting ^_^')
         self.full_eval()
-
-
-    def paint_legacy(self):
-        logger.info('Starting training ^_^')
-        
-        TEXTure_start_time = time.perf_counter()  # Record the start time
-        # Evaluate the initialization
-        #MJ: self.evaluate(self.dataloaders['val'], self.eval_renders_path)
-        self.mesh_model.train()
-
-        pbar = tqdm(total=len(self.dataloaders['train']), initial=self.paint_step,
-                    bar_format='{desc}: {percentage:3.0f}% painting step {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
-
-        # JA: The following loop computes the texture atlas for the given mesh using ten render images. In other words,
-        # it is the inverse rendering process. Each of the ten views is one of the six view images.
-        for data in self.dataloaders['train']:
-            self.paint_step += 1
-            pbar.update(1)
-            self.paint_viewpoint(data) # JA: paint_viewpoint computes the part of the texture atlas by using a specific view image
-            #MJ: self.evaluate(self.dataloaders['val'], self.eval_renders_path)  # JA: This is the validation of the currently leared texture map using various camera viewpoints                                                                          # training step
-            self.mesh_model.train() # JA: Set the model to train mode because the self.evaluate sets the model to eval mode.
-
-        self.mesh_model.change_default_to_median()
-        logger.info('Finished Painting ^_^')
-        logger.info('Saving the last result...')
-        
-        
-        TEXTure_end_time = time.perf_counter()  # Record the end  time
-        total_elapsed_time =   TEXTure_end_time  -  TEXTure_start_time
-        print(f"Total Elapsed time with TEXTure: {total_elapsed_time:.4f} seconds")
-
-        self.full_eval()
-        logger.info('\tDone!')
 
     def evaluate(self, dataloader: DataLoader, save_path: Path, save_as_video: bool = False): #MJ: dataloader=self.dataloaders['val']
         logger.info(f'Evaluating and saving model, painting iteration #{self.paint_step}...')
