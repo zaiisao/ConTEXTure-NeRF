@@ -129,7 +129,8 @@ class TexturedMeshModel(nn.Module):
                                  interpolation_mode=self.opt.texture_interpolation_mode, fovyangle=fovyangle)
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
-        self.background_sphere_colors, _ = self.init_paint() # JA: self.texture_img is a learnable parameter
+        # self.background_sphere_colors, self.texture_img = self.init_paint() # JA: self.texture_img is a learnable parameter
+        self.background_sphere_colors, _ = self.init_paint()
 
         self.texture_mlp = texture_mlp
         self.uv_embedder = uv_embedder

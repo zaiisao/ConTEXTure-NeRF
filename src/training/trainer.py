@@ -73,7 +73,7 @@ class ConTEXTure:
         self.uv_embedder, input_ch_uv = get_embedder(multires=8) 
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
-        self.texture_mlp = NeRF(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
+        self.texture_mlp = NeRF2D(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
         if torch.cuda.device_count() > 1:
             self.texture_mlp = nn.DataParallel(self.texture_mlp)
 
@@ -367,8 +367,7 @@ class ConTEXTure:
         with the Zero123++ model as the teacher.
         """
         logger.info('Starting SDS Texture Generation ^_^')
-        
-        # --- 1. PREPARATION (Largely the same as your original code) ---
+
         self.define_view_weights()
         self.mesh_model.train()
         background_gray = torch.tensor([0.5, 0.5, 0.5], device=self.device)
@@ -412,53 +411,55 @@ class ConTEXTure:
 
         depth_image_pil = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0])
 
-        # --- 2. SETUP SDS LOOP ---
+        # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
         optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
         
-        # --- FIX: Replicate the pipeline's conditioning logic ---
         with torch.no_grad():
-            # Process condition image for VAE and Vision Encoder
             cond_image_vae = self.zero123plus.feature_extractor_vae(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=vae.dtype)
             cond_image_clip = self.zero123plus.feature_extractor_clip(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=unet.dtype)
-            
-            # Get conditional latent
+
             cond_lat = vae.encode(cond_image_vae).latent_dist.sample()
             
-            # Get unconditional latent (for guidance)
+            # JA: Get unconditional latent for guidance
             negative_lat = vae.encode(torch.zeros_like(cond_image_vae)).latent_dist.sample()
             
-            # Get vision encoder embeddings
             encoded = self.zero123plus.vision_encoder(cond_image_clip, output_hidden_states=False)
             global_embeds = encoded.image_embeds.unsqueeze(-2)
             
-            # Get text embeddings (for empty prompt) and combine with vision embeddings
+            # JA: Get text embeddings (for empty prompt) and combine with vision embeddings
             text_embeds = self.zero123plus.encode_prompt("", self.device, 1, False)[0]
             ramp = global_embeds.new_tensor(self.zero123plus.config.ramping_coefficients).unsqueeze(-1)
             encoder_hidden_states = text_embeds + global_embeds * ramp
             
-            # Get unconditional text embeddings
+            # JA: Get unconditional text embeddings
             uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
             
-            # Concatenate for classifier-free guidance
+            # JA: Concatenate for classifier-free guidance
             final_encoder_hidden_states = torch.cat([uncond_embeds, encoder_hidden_states])
             final_cond_lat = torch.cat([negative_lat, cond_lat])
 
-            # Prepare depth map tensor
+            # JA: Prepare depth map tensor for ControlNet
             depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil).to(device=self.device, dtype=unet.dtype)
 
-        sds_steps = 50000
-        scheduler.set_timesteps(sds_steps, device=self.device)
-        timesteps = scheduler.timesteps
+        num_timesteps = 1000
+        timesteps = torch.arange(0, num_timesteps, dtype=torch.float64, device=self.device).flip(0)
+        alphas = 1. - (torch.linspace(
+            1e-4 ** 0.5, 2e-2 ** 0.5, num_timesteps, device=self.device, dtype=torch.float64
+        ) ** 2)
+
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+        epochs = 30000
 
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
-        with tqdm(range(sds_steps), desc='SDS Texture Optimization') as pbar:
+        with tqdm(range(epochs), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                t = torch.randint(0, len(timesteps), (1,), device=self.device).long()
+                t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
                 t = timesteps[t]
 
                 optimizer.zero_grad()
@@ -470,11 +471,10 @@ class ConTEXTure:
                 six_view_weights = self.view_weights[1:]
 
                 gray_bg = torch.full_like(rendered_six_views_clean, 0.5)
-                # masked_rendered_views =  #torch.where(six_view_weights.bool(), rendered_six_views_clean, gray_bg)
 
                 cropped_renders_small_list = []
                 cropped_depths_small_list = []
-                for j in range(B - 1): # Loop 6 times for the 6 novel views
+                for j in range(B - 1):
                     min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(object_masks[j + 1, 0])
 
                     cropped_render = F.interpolate(rendered_six_views_clean[j:j+1, :, min_h:max_h, min_w:max_w], (320, 320), mode='bilinear', align_corners=False)
@@ -488,8 +488,6 @@ class ConTEXTure:
                     torch.cat((cropped_renders_small_list[2], cropped_renders_small_list[5]), dim=3),
                 ), dim=2)
 
-                self.log_train_image(rendered_grid_clean, f'rendered_grid_clean_{i}')
-
                 rendered_grid_clean = scale_image(rendered_grid_clean)
 
                 latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample()
@@ -498,19 +496,23 @@ class ConTEXTure:
                 scaled_latents_clean = scale_latents(latents_clean)
 
                 noise = torch.randn_like(scaled_latents_clean)
-                latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(0))
 
-                # --- Get Teacher's Score (UNet Prediction) ---
+                alpha_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
+                sqrt_alpha_t = torch.sqrt(alpha_t).reshape(1, 1, 1, 1)
+                sqrt_one_minus_alpha_t = torch.sqrt(1. - alpha_t).reshape(1, 1, 1, 1)
+
+                latents_noisy = sqrt_alpha_t * scaled_latents_clean + sqrt_one_minus_alpha_t * noise
+                latents_noisy = latents_noisy.half()
+
                 latent_model_input = torch.cat([latents_noisy] * 2)
                 latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
                 
-                # Prepare cross-attention kwargs, which is how this pipeline passes conditioning
+                # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
                 cross_attention_kwargs = {
                     "cond_lat": final_cond_lat,
                     "control_depth": depth_tensor #depth_grid.half()
                 }
 
-                # with torch.no_grad():
                 noise_pred = unet(
                     latent_model_input, t, 
                     encoder_hidden_states=final_encoder_hidden_states,
@@ -523,79 +525,26 @@ class ConTEXTure:
                 guidance_scale = 4
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                # --- Calculate SDS Loss Gradient ---
-                w = (1 - scheduler.alphas_cumprod[t.cpu().long()]).to(self.device)
+                # JA: Calculate SDS loss gradient
+                w = (1 - alphas_cumprod[t.cpu().long()]).to(self.device)
                 grad = w * (noise_pred - noise)
 
                 loss = (grad * scaled_latents_clean).mean()
                 current_loss = loss.item()
-                
-                # --- Backpropagate the gradient to the texture map ---
+
                 scaled_latents_clean.backward(gradient=grad)
                 grad_magnitude = grad.norm().item()
                 loss_for_logging = torch.nn.functional.mse_loss(noise_pred, noise, reduction='mean').item()
-                
-                # --- Update Texture Map ---
+
                 optimizer.step()
 
-                if i % 1000 == 0 and i > 0:
+                if i % 100 == 0 and i > 0:
                     self.log_texture_map(i)
+                    self.log_train_image(rendered_grid_clean, f'rendered_grid_clean_{i}')
 
                 pbar.set_description(f"SDS Texture Optimization: Iter {i}, Loss: {loss_for_logging:.4f}")
                 pbar.update(1)
 
-# --- 3. DIAGNOSTIC TEST: Standard Denoising Loop ---
-        # logger.info("Starting diagnostic test: Performing standard inference...")
-
-        # # Start from pure random noise, not a rendered image
-        # latents = torch.randn((1, unet.config.in_channels, 120, 80), device=self.device, dtype=unet.dtype, layout=torch.strided)
-        # latents = latents * scheduler.init_noise_sigma
-
-        # with tqdm(total=len(timesteps), desc='Diagnostic Denoising') as pbar:
-        #     for t in timesteps:
-        #         # Prepare inputs for the UNet (as before)
-        #         latent_model_input = torch.cat([latents] * 2)
-        #         latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
-        #         cross_attention_kwargs = {
-        #             "cond_lat": final_cond_lat,
-        #             "control_depth": depth_tensor
-        #         }
-
-        #         # Get the teacher's prediction (as before)
-        #         with torch.no_grad():
-        #             noise_pred = unet(
-        #                 latent_model_input, t, 
-        #                 encoder_hidden_states=final_encoder_hidden_states,
-        #                 cross_attention_kwargs=cross_attention_kwargs,
-        #                 return_dict=False
-        #             )[0]
-                
-        #         # Perform guidance (as before)
-        #         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        #         noise_pred = noise_pred_uncond + 4 * (noise_pred_text - noise_pred_uncond)
-
-        #         # --- THIS IS THE KEY CHANGE ---
-        #         # Instead of calculating a loss, use the scheduler to take a denoising step
-        #         latents = scheduler.step(noise_pred, t, latents).prev_sample
-        #         pbar.update(1)
-
-        # # --- 4. Decode and Save the Test Image ---
-        # logger.info("Diagnostic test finished. Decoding and saving result...")
-        # with torch.no_grad():
-        #     # Apply the custom unscaling from the pipeline
-        #     latents = unscale_latents(latents)
-        #     image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
-        #     image = self.zero123plus.image_processor.postprocess(image, output_type='pil')
-        #     image[0].save("/home/sogang/jaehoon/test_output.png")
-        
-        # # Save the final image for inspection
-        # # self.log_train_image(image, 'DIAGNOSTIC_TEST_RESULT.png')
-        # logger.info("Diagnostic image saved. Check your output directory. Does it look like a coherent set of views?")
-
-        # # Since this is just a test, we can stop here.
-        # return
-
-        # --- 4. FINAL CLEANUP ---
         self.mesh_model.change_default_to_median()
         logger.info('Finished SDS Painting ^_^')
         self.full_eval()

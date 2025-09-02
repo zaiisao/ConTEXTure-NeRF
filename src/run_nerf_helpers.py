@@ -65,11 +65,12 @@ def get_embedder(multires, i=0):
     return embed, embedder_obj.out_dim
 
 # Model
-class NeRF(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+class NeRF2D(nn.Module):
+    # def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=4, skips=[4]):
         """ 
         """
-        super(NeRF, self).__init__()
+        super(NeRF2D, self).__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
@@ -77,7 +78,7 @@ class NeRF(nn.Module):
         self.skips = skips
         # self.use_viewdirs = use_viewdirs
         
-        self.uv_linears = nn.ModuleList(
+        self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] +
             [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
         
@@ -99,15 +100,32 @@ class NeRF(nn.Module):
         # input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         # h = input_pts
         h = x
-        for i, l in enumerate(self.uv_linears):
-            h = self.uv_linears[i](h)
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
             h = F.relu(h)
             if i in self.skips:
                 # h = torch.cat([input_pts, h], -1)
                 h = torch.cat([x, h], -1)
 
+        # if self.use_viewdirs:
+        #     alpha = self.alpha_linear(h)
+        #     feature = self.feature_linear(h)
+        #     h = torch.cat([feature, input_views], -1)
+        
+        #     for i, l in enumerate(self.views_linears):
+        #         h = self.views_linears[i](h)
+        #         h = F.relu(h)
+
+        #     rgb = self.rgb_linear(h)
+        #     outputs = torch.cat([rgb, alpha], -1)
+        # else:
         outputs = self.output_linear(h)
 
+        # JA: The output of the 2D NeRF is the RGB value of the texture map which ranges to 0 to 1
+        # In the original NeRF code, the sigmoid is in the raw2outputs function in run_nerf.py
+        # https://github.com/yenchenlin/nerf-pytorch/blob/master/run_nerf.py
+
+        # return outputs
         return torch.sigmoid(outputs)
 
 
