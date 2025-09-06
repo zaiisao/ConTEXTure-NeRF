@@ -96,6 +96,13 @@ class NeRF2D(nn.Module):
         # else:
         self.output_linear = nn.Linear(W, output_ch)
 
+        for layer in self.pts_linears:
+            # JA: Check if the layer has a 'weight' attribute (i.e., if it's a Linear layer)
+            if hasattr(layer, 'weight'):
+                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+
+        nn.init.kaiming_normal_(self.output_linear.weight, mode='fan_in', nonlinearity='relu')
+
     def forward(self, x):
         # input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
         # h = input_pts
