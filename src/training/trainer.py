@@ -447,6 +447,10 @@ class ConTEXTure:
 
         num_timesteps = 1000
         timesteps = torch.arange(0, num_timesteps, dtype=torch.float64, device=self.device).flip(0)
+
+        # JA: Where α = 1 - β, β represents standard deviations and ranges from sqrt(1e-4) to sqrt(2e-2). This is the same
+        # setting used by Stable Diffusion. β consists of num_timesteps number of equidistant standard deviations between
+        # the aforementioned two numbers.
         alphas = 1. - (torch.linspace(
             1e-4 ** 0.5, 2e-2 ** 0.5, num_timesteps, device=self.device, dtype=torch.float64
         ) ** 2)
@@ -488,6 +492,7 @@ class ConTEXTure:
                     torch.cat((cropped_renders_small_list[2], cropped_renders_small_list[5]), dim=3),
                 ), dim=2)
 
+                rendered_grid_clean = rendered_grid_clean * 2 - 1
                 rendered_grid_clean = scale_image(rendered_grid_clean)
 
                 latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample()
@@ -495,54 +500,71 @@ class ConTEXTure:
 
                 scaled_latents_clean = scale_latents(latents_clean)
 
-                noise = torch.randn_like(scaled_latents_clean)
+                # index = num_timesteps - t.cpu().long() - 1
 
-                alpha_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
-                sqrt_alpha_t = torch.sqrt(alpha_t).reshape(1, 1, 1, 1)
-                sqrt_one_minus_alpha_t = torch.sqrt(1. - alpha_t).reshape(1, 1, 1, 1)
+                alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
+                sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
+                sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
 
-                latents_noisy = sqrt_alpha_t * scaled_latents_clean + sqrt_one_minus_alpha_t * noise
-                latents_noisy = latents_noisy.half()
+                with torch.no_grad():
+                    noise = torch.randn_like(scaled_latents_clean)
 
-                latent_model_input = torch.cat([latents_noisy] * 2)
-                latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
+                    # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
+                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise
+                    latents_noisy = latents_noisy.half()
+
+                    latent_model_input = torch.cat([latents_noisy] * 2)
+                    latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
+                    
+                    # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
+                    cross_attention_kwargs = {
+                        "cond_lat": final_cond_lat,
+                        "control_depth": depth_tensor #depth_grid.half()
+                    }
+
+                    noise_pred = unet(
+                        latent_model_input, t, 
+                        encoder_hidden_states=final_encoder_hidden_states,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        return_dict=False
+                    )[0]
                 
-                # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
-                cross_attention_kwargs = {
-                    "cond_lat": final_cond_lat,
-                    "control_depth": depth_tensor #depth_grid.half()
-                }
-
-                noise_pred = unet(
-                    latent_model_input, t, 
-                    encoder_hidden_states=final_encoder_hidden_states,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    return_dict=False
-                )[0]
-                
-                # Perform guidance
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                guidance_scale = 4
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    # Perform guidance
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    guidance_scale = 100
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # JA: Calculate SDS loss gradient
-                w = (1 - alphas_cumprod[t.cpu().long()]).to(self.device)
-                grad = w * (noise_pred - noise)
+                # scaling_factor = 1 / torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device)
+                # loss = ((scaling_factor * (noise_pred - noise)) ** 2).mean()
 
-                loss = (grad * scaled_latents_clean).mean()
-                current_loss = loss.item()
+                # pred_x0 = (latents_noisy - sqrt_one_minus_alpha_t * noise_pred) / alphas_cumprod[index].sqrt()
 
-                scaled_latents_clean.backward(gradient=grad)
-                grad_magnitude = grad.norm().item()
-                loss_for_logging = torch.nn.functional.mse_loss(noise_pred, noise, reduction='mean').item()
+                grad_scale = 1
+                w = (1 - alphas_cumprod[t.cpu().long()])
+                grad = grad_scale * w[:, None, None, None] * (noise_pred - noise)
+                grad = torch.nan_to_num(grad)
+
+                # 2. Define the target latent
+                targets = (scaled_latents_clean - grad).float().detach()
+
+                # 3. Calculate the MSE loss
+                loss = 0.5 * F.mse_loss(
+                    unscale_latents(scaled_latents_clean).float(),
+                    unscale_latents(targets),
+                    reduction='sum'
+                ) / scaled_latents_clean.shape[0]
+                # loss = loss.float()
+
+                loss.backward()
 
                 optimizer.step()
 
                 if i % 100 == 0 and i > 0:
                     self.log_texture_map(i)
-                    self.log_train_image(rendered_grid_clean, f'rendered_grid_clean_{i}')
+                    self.log_train_image((unscale_image(rendered_grid_clean) + 1) / 2, f'rendered_grid_clean_{i}')
 
-                pbar.set_description(f"SDS Texture Optimization: Iter {i}, Loss: {loss_for_logging:.4f}")
+                # pbar.set_description(f"SDS Texture Optimization: Iter {i}, Loss: {loss_for_logging:.4f}")
                 pbar.update(1)
 
         self.mesh_model.change_default_to_median()
@@ -631,6 +653,7 @@ class ConTEXTure:
         render_cache = outputs['render_cache'] # JA: All the render outputs have the shape of (1200, 1200)
         rgb_render_raw = outputs['image']  #MJ: The rendered image without using use-median = True 
         depth_render = outputs['depth']
+        object_mask_bchw = outputs['mask']
         
         # Render again with the median value to use as rgb, we shouldn't have color leakage, but just in case
         
@@ -640,12 +663,12 @@ class ConTEXTure:
                                           render_cache=render_cache, use_median=self.paint_step > 1)
         rgb_render = outputs['image']
         
-        meta_output = self.mesh_model.render(background=background,
-                                            use_meta_texture=True, render_cache=render_cache)
+        # meta_output = self.mesh_model.render(background=background,
+        #                                     use_meta_texture=True, render_cache=render_cache)
 
         z_normals = outputs['normals'][:, -1:, :, :].clamp(0, 1)
-        z_normals_cache = meta_output['image'].clamp(0, 1)
-        edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
+        # z_normals_cache = meta_output['image'].clamp(0, 1)
+        # edited_mask = meta_output['image'].clamp(0, 1)[:, 1:2]
 
           
         self.log_train_image(rgb_render, 'paint_viewpoint:rgb_render')
@@ -669,80 +692,26 @@ class ConTEXTure:
             view_dir = None
         logger.info(f'text: {text_string}')
 
-        #MJ: Because we do not consider each viewpoint in a sequence to project-back the view image to the texture-atlas, we do not use the trimap
-       
-        # JA: Create trimap of keep, refine, and generate using the render output
-        update_mask, generate_mask, refine_mask = self.calculate_trimap(rgb_render_raw=rgb_render_raw,
-                                                                            depth_render=depth_render,
-                                                                            z_normals=z_normals,
-                                                                            z_normals_cache=z_normals_cache,
-                                                                            edited_mask=edited_mask,
-                                                                            mask=outputs['mask'])
-
-        update_ratio = float(update_mask.sum() / (update_mask.shape[2] * update_mask.shape[3]))
-        if self.cfg.guide.reference_texture is not None and update_ratio < 0.01:
-            logger.info(f'Update ratio {update_ratio:.5f} is small for an editing step, skipping')
-            return
-
-        self.log_train_image(rgb_render * (1 - update_mask), name='paint_viewpoint:masked_rgb_render')
-        self.log_train_image(rgb_render * refine_mask, name='paint_viewpoint:refine_rgb_render')
-        self.log_train_image( torch.cat([ refine_mask, refine_mask, refine_mask], dim=1), name='paint_viewpoint:refine_mask')
-        self.log_train_image( torch.cat([ update_mask, update_mask, update_mask], dim=1), name='paint_viewpoint:update_mask') 
-        self.log_train_image( torch.cat([ generate_mask, generate_mask, generate_mask], dim=1), name='paint_viewpoint:generate_mask')
-       
         # Crop to inner region based on object mask
-        # Crop to inner region based on object mask
-        min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(outputs['mask'][0, 0])
+        object_mask_hw = object_mask_bchw[0, 0] # JA: object_mask_bchw.shape = [1, 1, 1200, 1200]
+        min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(object_mask_hw)
         crop = lambda x: x[:, :, min_h:max_h, min_w:max_w]
         cropped_rgb_render = crop(rgb_render) # JA: This is rendered image which is denoted as Q_0.
                                               # In our experiment, 1200 is cropped to 827
         cropped_depth_render = crop(depth_render)
-        
-        
-        cropped_update_mask = crop(update_mask)
+        cropped_object_mask_bchw = crop(object_mask_bchw)
      
         self.log_train_image(cropped_rgb_render, name='paint_viewpoint:cropped_rgb_render')
         self.log_train_image(cropped_depth_render.repeat_interleave(3, dim=1), name='paint_viewpoint:cropped_depth')
 
-        checker_mask = None
-             
-        if self.paint_step > 1 or self.cfg.guide.initial_texture is not None:
-            # JA: generate_checkerboard is defined in formula 2 of the paper
-            checker_mask = self.generate_checkerboard(crop(update_mask), crop(refine_mask),
-                                                    crop(generate_mask))
-            self.log_train_image(F.interpolate(cropped_rgb_render, (512, 512)) * (1 - checker_mask),
-                                'checkerboard_input')
-       
-        
         start_time = time.perf_counter()  # Record the start time
-        #rgb_output_front, object_mask_front = self.paint_viewpoint(data, should_project_back=True)
-        
-        #MJ: Use cropped_update_mask (which is the object mask) as the input to img2img_step, instead of the cropped rgb render image
-        cropped_update_mask_rgb = torch.cat( [cropped_update_mask,cropped_update_mask,cropped_update_mask ],dim=1)
-        # cropped_rgb_output, steps_vis = self.diffusion.img2img_step(text_z, #cropped_update_mask_rgb.detach(), 
-        #                                                             cropped_rgb_render.detach(), # JA: We use the cropped rgb output as the input for the depth pipeline
-        #                                                             cropped_depth_render.detach(),
-        #                                                             guidance_scale=self.cfg.guide.guidance_scale,
-        #                                                             strength=1.0, update_mask=cropped_update_mask,
-        #                                                             fixed_seed=self.cfg.optim.seed,
-        #                                                             check_mask=checker_mask,
-        #                                                             intermediate_vis=self.cfg.log.vis_diffusion_steps,
 
-        #                                                             # JA: The following were added to use the view image
-        #                                                             # created by Zero123
-        #                                                             view_dir=view_dir, # JA: view_dir = "left",e.g.; this is used to check if the view direction is front
-        #                                                             front_image=resized_zero123_front_input,
-        #                                                             phi=data['phi'],
-        #                                                             theta=data['base_theta'] - data['theta'],
-        #                                                             condition_guidance_scales=condition_guidance_scales)
-        
         self.diffusion.use_inpaint = self.cfg.guide.use_inpainting and self.paint_step > 1
         cropped_rgb_output, steps_vis = self.diffusion.img2img_step(text_z, cropped_rgb_render.detach(),
                                                                     cropped_depth_render.detach(),
                                                                     guidance_scale=self.cfg.guide.guidance_scale,
-                                                                    strength=1.0, update_mask=cropped_update_mask,
+                                                                    strength=1.0, update_mask=cropped_object_mask_bchw,
                                                                     fixed_seed=self.cfg.optim.seed,
-                                                                    check_mask=checker_mask,
                                                                     intermediate_vis=self.cfg.log.vis_diffusion_steps)
         
 
@@ -847,93 +816,6 @@ class ConTEXTure:
         depth_render = outputs['depth'].permute(0, 2, 3, 1).contiguous().detach()
 
         return rgb_render, texture_rgb, depth_render, pred_z_normals
-
-    def calculate_trimap(self, rgb_render_raw: torch.Tensor,
-                         depth_render: torch.Tensor,
-                         z_normals: torch.Tensor, z_normals_cache: torch.Tensor, edited_mask: torch.Tensor,
-                         mask: torch.Tensor):
-        diff = (rgb_render_raw.detach() - torch.tensor(self.mesh_model.default_color).view(1, 3, 1, 1).to(
-            self.device)).abs().sum(axis=1)
-        exact_generate_mask = (diff < 0.1).float().unsqueeze(0)
-
-        # Extend exact_generate_mas mask
-        generate_mask = torch.from_numpy(
-            cv2.dilate(exact_generate_mask[0, 0].detach().cpu().numpy(), np.ones((19, 19), np.uint8))).to(
-            exact_generate_mask.device).unsqueeze(0).unsqueeze(0)
-
-        update_mask = generate_mask.clone()
-
-        object_mask = torch.ones_like(update_mask)
-        object_mask[depth_render == 0] = 0  #depth_render == 0 refers the background,  the non-object part: The background part is not be updated
-        object_mask = torch.from_numpy(
-            cv2.erode(object_mask[0, 0].detach().cpu().numpy(), np.ones((7, 7), np.uint8))).to(
-            object_mask.device).unsqueeze(0).unsqueeze(0)
-
-        # Generate the refine mask based on the z normals, and the edited mask
-
-        refine_mask = torch.zeros_like(update_mask)
-        refine_mask[z_normals > ( z_normals_cache[:, :1, :, :] + self.cfg.guide.z_update_thr ) ] = 1 #MJ: The part to be refined is the part where z_normals is greater than the max_z_normals_cache (==0 initially) +  0.2 
-        if self.cfg.guide.initial_texture is None:
-            refine_mask[z_normals_cache[:, :1, :, :] == 0] = 0  #MJ: refine_mask is zero for the front view, where z_normals_cache[:, :1, :, :] ==0
-        elif self.cfg.guide.reference_texture is not None:
-            refine_mask[edited_mask == 0] = 0
-            refine_mask = torch.from_numpy(
-                cv2.dilate(refine_mask[0, 0].detach().cpu().numpy(), np.ones((31, 31), np.uint8))).to(
-                mask.device).unsqueeze(0).unsqueeze(0)
-            refine_mask[mask == 0] = 0
-            # Don't use bad angles here
-            refine_mask[z_normals < 0.4] = 0
-        else:
-            # Update all regions inside the object
-            refine_mask[mask == 0] = 0
-
-        refine_mask = torch.from_numpy(
-            cv2.erode(refine_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
-            mask.device).unsqueeze(0).unsqueeze(0)
-        refine_mask = torch.from_numpy(
-            cv2.dilate(refine_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
-            mask.device).unsqueeze(0).unsqueeze(0)
-        update_mask[refine_mask == 1] = 1  #MJ: Among the pixels of the update_mask, the part to be refined is set to 1``
-
-        update_mask[torch.bitwise_and(object_mask == 0, generate_mask == 0)] = 0 #MJ: The non object part and the non-generation part is not updated
-
-        # Visualize trimap
-        if self.cfg.log.log_images:
-            trimap_vis = utils.color_with_shade(color=[112 / 255.0, 173 / 255.0, 71 / 255.0], z_normals=z_normals)
-            trimap_vis[mask.repeat(1, 3, 1, 1) == 0] = 1
-            trimap_vis = trimap_vis * (1 - exact_generate_mask) + utils.color_with_shade(
-                [255 / 255.0, 22 / 255.0, 67 / 255.0],
-                z_normals=z_normals,
-                light_coef=0.7) * exact_generate_mask
-
-            shaded_rgb_vis = rgb_render_raw.detach()
-            shaded_rgb_vis = shaded_rgb_vis * (1 - exact_generate_mask) + utils.color_with_shade([0.85, 0.85, 0.85],
-                                                                                                 z_normals=z_normals,
-                                                                                                 light_coef=0.7) * exact_generate_mask
-
-            if self.paint_step > 1 or self.cfg.guide.initial_texture is not None:
-                refinement_color_shaded = utils.color_with_shade(color=[91 / 255.0, 155 / 255.0, 213 / 255.0],
-                                                                 z_normals=z_normals)
-                only_old_mask_for_vis = torch.bitwise_and(refine_mask == 1, exact_generate_mask == 0).float().detach()
-                trimap_vis = trimap_vis * 0 + 1.0 * (trimap_vis * (
-                        1 - only_old_mask_for_vis) + refinement_color_shaded * only_old_mask_for_vis)
-            self.log_train_image(shaded_rgb_vis, 'shaded_input')
-            self.log_train_image(trimap_vis, 'trimap')
-
-        return update_mask, generate_mask, refine_mask
-
-    def generate_checkerboard(self, update_mask_inner, improve_z_mask_inner, update_mask_base_inner):
-        checkerboard = torch.ones((1, 1, 64 // 2, 64 // 2)).to(self.device)
-        # Create a checkerboard grid
-        checkerboard[:, :, ::2, ::2] = 0
-        checkerboard[:, :, 1::2, 1::2] = 0
-        checkerboard = F.interpolate(checkerboard,
-                                     (512, 512))
-        checker_mask = F.interpolate(update_mask_inner, (512, 512))
-        only_old_mask = F.interpolate(torch.bitwise_and(improve_z_mask_inner == 1,
-                                                        update_mask_base_inner == 0).float(), (512, 512))
-        checker_mask[only_old_mask == 1] = checkerboard[only_old_mask == 1]
-        return checker_mask
 
     def print_hook(self, grad):
            print(f"Gradient: {grad}")  
