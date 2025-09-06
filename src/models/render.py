@@ -147,7 +147,12 @@ class Renderer:
         # Use advanced indexing to gather the results
         normals_image = face_normals[batch_indices, face_idx]
 
-        render_cache = {'uv_features':uv_features, 'face_normals':face_normals,'face_idx':face_idx, 'depth_map':depth_map}
+        render_cache = {
+            'uv_features': uv_features,
+            'face_normals': face_normals,
+            'face_idx': face_idx,
+            'depth_map': depth_map
+        }
 
         return image_features.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2),\
                depth_map.permute(0, 3, 1, 2), normals_image.permute(0, 3, 1, 2), render_cache

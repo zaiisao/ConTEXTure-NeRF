@@ -282,8 +282,8 @@ class StableDiffusion(nn.Module):
     # the original depth map. However, the Control0123 model has been trained on the full-size depth mask.
     # inputs = Q_t = cropped_rgb_render
     def img2img_step(self, text_embeddings, inputs, original_depth_mask, guidance_scale=100, strength=0.5,
-                     num_inference_steps=50, update_mask=None, latent_mode=False, check_mask=None,
-                     fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False, view_dir=None,
+                     num_inference_steps=50, update_mask=None, latent_mode=False,
+                     fixed_seed=None, intermediate_vis=False, view_dir=None,
                      front_image=None, phi=None, theta=None, condition_guidance_scales=None):
         # input is 1 3 512 512      # JA: inputs is cropped_rgb_render.detach()
         # depth_mask is 1 1 512 512
@@ -294,8 +294,7 @@ class StableDiffusion(nn.Module):
 
         intermediate_results = []
 
-        def sample(latents, depth_mask, strength, num_inference_steps, update_mask=None, check_mask=None,
-                   masked_latents=None):
+        def sample(latents, depth_mask, strength, num_inference_steps, update_mask=None, masked_latents=None):
             self.scheduler.set_timesteps(num_inference_steps)
             noise = None
             if latents is None:
@@ -363,12 +362,7 @@ class StableDiffusion(nn.Module):
 
                         if mask_constraints_iters and update_mask is not None:
                             noised_truth = self.scheduler.add_noise(gt_latents, noise, t) # JA: noised_truth is z_Q_t and gt_latents is z_Q_0 (00XX_cropped_input.jpg)
-                            # JA: update_mask and check_mask are used in both the inpainting and depth pipelines
-                            # This implements formula 2 of the paper.
-                            if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
-                                curr_mask = check_mask
-                            else:
-                                curr_mask = update_mask # JA: update_mask means "refine" in the paper
+                            curr_mask = update_mask # JA: update_mask means "refine" in the paper
 
                             # JA: This corresponds to the formula 1 of the equation paper.
                             # z_i ← z_i * m_blended + z_Q_t * (1 − m_blended)
@@ -558,8 +552,6 @@ class StableDiffusion(nn.Module):
 
         if update_mask is not None:
             update_mask = F.interpolate(update_mask, (image_size // 8, image_size // 8), mode='nearest')
-        if check_mask is not None:
-            check_mask = F.interpolate(check_mask, (image_size // 8, image_size // 8), mode='nearest')
 
         # JA: Normalize depth map so that its values range from -1 to +1
         depth_mask = 2.0 * (depth_mask - depth_mask.min()) / (depth_mask.max() - depth_mask.min()) - 1.0
@@ -571,7 +563,7 @@ class StableDiffusion(nn.Module):
         with torch.no_grad():
             # JA: target_latents is the denoised image in the latent space for the given text_embeddings
             target_latents = sample(latents, depth_mask, strength=strength, num_inference_steps=num_inference_steps,
-                                    update_mask=update_mask, check_mask=check_mask, masked_latents=masked_latents)
+                                    update_mask=update_mask, masked_latents=masked_latents)
             target_rgb = self.decode_latents(target_latents)    # JA: Convert into the pixel space. target_rgb is the image corresponding to a specific view prompt
                                                                 # In our case, we need to obtain the image corresponding to a specific relative camera pose which
                                                                 # is obtained from the front view image. In our case target_rgb is the image created from zero123
@@ -586,8 +578,8 @@ class StableDiffusion(nn.Module):
             return target_rgb, intermediate_results
         
     def zero123plus_img2img_step(self, text_embeddings, inputs, original_depth_mask, guidance_scale=100, strength=0.5,
-                     num_inference_steps=50, update_mask=None, latent_mode=False, check_mask=None,
-                     fixed_seed=None, check_mask_iters=0.5, intermediate_vis=False, view_dir=None,
+                     num_inference_steps=50, update_mask=None, latent_mode=False,
+                     fixed_seed=None, intermediate_vis=False, view_dir=None,
                      front_image=None, phi=None, theta=None, condition_guidance_scales=None):
         # input is 1 3 512 512      # JA: inputs is cropped_rgb_render.detach()
         # depth_mask is 1 1 512 512
@@ -595,8 +587,7 @@ class StableDiffusion(nn.Module):
 
         intermediate_results = []
 
-        def sample(latents, depth_mask, strength, num_inference_steps, update_mask=None, check_mask=None,
-                   masked_latents=None):
+        def sample(latents, depth_mask, strength, num_inference_steps, update_mask=None, masked_latents=None):
             self.scheduler.set_timesteps(num_inference_steps)
             noise = None
             if latents is None:
@@ -664,12 +655,7 @@ class StableDiffusion(nn.Module):
 
                         if mask_constraints_iters and update_mask is not None:
                             noised_truth = self.scheduler.add_noise(gt_latents, noise, t) # JA: noised_truth is z_Q_t and gt_latents is z_Q_0 (00XX_cropped_input.jpg)
-                            # JA: update_mask and check_mask are used in both the inpainting and depth pipelines
-                            # This implements formula 2 of the paper.
-                            if check_mask is not None and i < int(len(timesteps) * check_mask_iters):
-                                curr_mask = check_mask
-                            else:
-                                curr_mask = update_mask # JA: update_mask means "refine" in the paper
+                            curr_mask = update_mask # JA: update_mask means "refine" in the paper
 
                             # JA: This corresponds to the formula 1 of the equation paper.
                             # z_i ← z_i * m_blended + z_Q_t * (1 − m_blended)
@@ -852,8 +838,6 @@ class StableDiffusion(nn.Module):
 
         if update_mask is not None:
             update_mask = F.interpolate(update_mask, (image_size // 8, image_size // 8), mode='nearest')
-        if check_mask is not None:
-            check_mask = F.interpolate(check_mask, (image_size // 8, image_size // 8), mode='nearest')
 
         # JA: Normalize depth map so that its values range from -1 to +1
         depth_mask = 2.0 * (depth_mask - depth_mask.min()) / (depth_mask.max() - depth_mask.min()) - 1.0
@@ -865,7 +849,7 @@ class StableDiffusion(nn.Module):
         with torch.no_grad():
             # JA: target_latents is the denoised image in the latent space for the given text_embeddings
             target_latents = sample(latents, depth_mask, strength=strength, num_inference_steps=num_inference_steps,
-                                    update_mask=update_mask, check_mask=check_mask, masked_latents=masked_latents)
+                                    update_mask=update_mask, masked_latents=masked_latents)
             target_rgb = self.decode_latents(target_latents)    # JA: Convert into the pixel space. target_rgb is the image corresponding to a specific view prompt
                                                                 # In our case, we need to obtain the image corresponding to a specific relative camera pose which
                                                                 # is obtained from the front view image. In our case target_rgb is the image created from zero123

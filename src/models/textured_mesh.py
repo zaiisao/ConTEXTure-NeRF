@@ -130,7 +130,7 @@ class TexturedMeshModel(nn.Module):
         self.env_sphere, self.mesh = self.init_meshes()
         self.default_color = [0.8, 0.1, 0.8] # JA: This is the magenta color, set to the texture atlas
         # self.background_sphere_colors, self.texture_img = self.init_paint() # JA: self.texture_img is a learnable parameter
-        self.background_sphere_colors, _ = self.init_paint()
+        # self.background_sphere_colors, _ = self.init_paint()
 
         self.texture_mlp = texture_mlp
         self.uv_embedder = uv_embedder
@@ -265,33 +265,80 @@ class TexturedMeshModel(nn.Module):
 
     def get_texture_map(self) -> torch.Tensor:
         res = self.texture_resolution
+
         uv_coords_flat = torch.stack(torch.meshgrid(
             torch.linspace(0, 1, res, device=self.device), 
             torch.linspace(0, 1, res, device=self.device), 
             indexing='xy'), dim=-1).reshape(-1, 2)
         
         embedded_uvs = self.uv_embedder(uv_coords_flat)
-        texture_colors = self.texture_mlp(embedded_uvs)
+        texture_colors = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
         
         return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2)
 
-    def init_paint(self, num_backgrounds=1):
-        # random color face attributes for background sphere
-        init_background_bases = torch.rand(num_backgrounds, 3).to(self.device)
-        modulated_init_background_bases_latent = init_background_bases[:, None, None, :] * 0.8 + 0.2 * torch.randn(
-            num_backgrounds, self.env_sphere.faces.shape[0],
-            3, self.num_features, dtype=torch.float32).cuda()
-        background_sphere_colors = nn.Parameter(modulated_init_background_bases_latent.cuda())
+    def get_texture_map_only_valid_areas(self) -> torch.Tensor:
+        """
+        Generates the flat 2D texture map
+        """
+        res = self.texture_resolution
 
-        if self.initial_texture_path is not None:
-            texture = torch.Tensor(np.array(Image.open(self.initial_texture_path).resize(
-                (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
-        else: # JA: This is the case in our experiment
-            texture = torch.ones(1, 3, self.texture_resolution, self.texture_resolution).cuda() * torch.Tensor(
-                self.default_color).reshape(1, 3, 1, 1).cuda()
-        # texture_img = nn.Parameter(texture) # JA: In the NeRF version, texture_img is retrieved with get_texture_map
-        texture_img = None
-        return background_sphere_colors, texture_img
+        # JA: From https://kaolin.readthedocs.io/en/latest/modules/kaolin.ops.mesh.html
+        # vertices_features (torch.FloatTensor) – vertices features, of shape (batch_size, num_points, knum),
+        # knum is feature dimension, the features could be xyz position, rgb color, or even neural network
+        # features.
+        # faces (torch.LongTensor) – face index, of shape (num_faces, num_vertices)
+
+        # JA: vertices_features = self.vt, knum = self.ft.shape[-1], faces = self.ft
+        # uv_face_attributes indexes uv attributes by faces
+        uv_face_attributes = kal.ops.mesh.index_vertices_by_faces(
+            self.vt.unsqueeze(0), self.ft.long()
+        )
+
+        # JA: normalize [0, 1] texture coordinates to [-1, 1]
+        face_vertices_image = uv_face_attributes * 2.0 - 1.0
+        face_vertices_z = torch.ones_like(face_vertices_image[..., 0])
+
+        interpolated_uvs, face_idx = kal.render.mesh.rasterize(
+            res, res,
+            face_features=uv_face_attributes,
+            face_vertices_z=face_vertices_z,
+            face_vertices_image=face_vertices_image,
+        )
+        
+        mask = (face_idx >= 0).squeeze(0)
+        uvs_to_query = interpolated_uvs.squeeze(0)[mask]
+        final_image = torch.zeros(res, res, 3, device=self.device)
+
+        if uvs_to_query.shape[0] > 0:
+            def unscale_image(image):
+                image = image / 0.5 * 0.8
+                return image
+                
+            embedded_uvs = self.uv_embedder(uvs_to_query)
+            mlp_output = self.texture_mlp(embedded_uvs)
+            colors = unscale_image(mlp_output)
+            
+            final_image[mask] = colors
+        
+        return final_image.permute(2, 0, 1).unsqueeze(0)
+
+    # def init_paint(self, num_backgrounds=1):
+    #     # random color face attributes for background sphere
+    #     init_background_bases = torch.rand(num_backgrounds, 3).to(self.device)
+    #     modulated_init_background_bases_latent = init_background_bases[:, None, None, :] * 0.8 + 0.2 * torch.randn(
+    #         num_backgrounds, self.env_sphere.faces.shape[0],
+    #         3, self.num_features, dtype=torch.float32).cuda()
+    #     background_sphere_colors = nn.Parameter(modulated_init_background_bases_latent.cuda())
+
+    #     if self.initial_texture_path is not None:
+    #         texture = torch.Tensor(np.array(Image.open(self.initial_texture_path).resize(
+    #             (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
+    #     else: # JA: This is the case in our experiment
+    #         texture = torch.ones(1, 3, self.texture_resolution, self.texture_resolution).cuda() * torch.Tensor(
+    #             self.default_color).reshape(1, 3, 1, 1).cuda()
+    #     # texture_img = nn.Parameter(texture) # JA: In the NeRF version, texture_img is retrieved with get_texture_map
+    #     texture_img = None
+    #     return background_sphere_colors, texture_img
 
     def invert_color(self, color: torch.Tensor) -> torch.Tensor:
         # inverse linear approx to find latent
@@ -322,7 +369,8 @@ class TexturedMeshModel(nn.Module):
         else:
             vt_cache, ft_cache = cache_path / 'vt.pth', cache_path / 'ft.pth'
             cache_exists_flag = vt_cache.exists() and ft_cache.exists()
-
+        
+        # JA: vt is the vertex texture coordinate. ft is not in the obj file, but it can be calculated
         if self.mesh.vt is not None and self.mesh.ft is not None \
                 and self.mesh.vt.shape[0] > 0 and self.mesh.ft.min() > -1:
             logger.info('Mesh includes UV map')
@@ -345,6 +393,7 @@ class TexturedMeshModel(nn.Module):
             atlas.generate(chart_options=chart_options)
             vmapping, ft_np, vt_np = atlas[0]  # [N], [M, 3], [N, 2] # JA: vt stores texture UV coordinates for each vertex. ft stores indices to the UV array for each face.
 
+            # JA: xatlas produces the vt to be of range [0, 1]
             vt = torch.from_numpy(vt_np.astype(np.float32)).float().cuda()
             ft = torch.from_numpy(ft_np.astype(np.int64)).int().cuda()
             if cache_path is not None:
@@ -444,8 +493,8 @@ class TexturedMeshModel(nn.Module):
         else:
             batch_size = render_cache["uv_features"].shape[0]
 
-        background_sphere_colors = self.background_sphere_colors[
-            torch.randint(0, self.background_sphere_colors.shape[0], (batch_size,))]
+        # background_sphere_colors = self.background_sphere_colors[
+        #     torch.randint(0, self.background_sphere_colors.shape[0], (batch_size,))]
         texture_img = self.get_texture_map() #self.meta_texture_img if use_meta_texture else self.texture_img
 
         if self.augmentations:
@@ -453,15 +502,15 @@ class TexturedMeshModel(nn.Module):
         else:
             augmented_vertices = self.mesh.vertices
 
-        if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
-            diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
-                self.device)).abs().sum(axis=1)
-            default_mask = (diff < 0.1).float().unsqueeze(0)
-            median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
-                axis=1)  #MJ: get the median color of the non-magenta region of texture_img
-            texture_img = texture_img.clone()
-            with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
-                texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
+        # if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
+        #     diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
+        #         self.device)).abs().sum(axis=1)
+        #     default_mask = (diff < 0.1).float().unsqueeze(0)
+        #     median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
+        #         axis=1)  #MJ: get the median color of the non-magenta region of texture_img
+        #     texture_img = texture_img.clone()
+        #     with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
+        #         texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
                 
         #MJ:  When rendering images, having large patches of a default or placeholder color (like magenta) 
         #  can be visually jarring and unrealistic. By filling these regions with a median color derived
@@ -519,15 +568,15 @@ class TexturedMeshModel(nn.Module):
             pred_map = pred_features
             pred_back = pred_features
         else:
-            if background is None:
-                pred_back, _, _ = self.renderer.render_multiple_view(self.env_sphere,
-                                                                   background_sphere_colors,
-                                                                   elev=theta,
-                                                                   azim=phi,
-                                                                   radius=radius,
-                                                                   dims=dims,
-                                                                   look_at_height=self.dy, calc_depth=False)
-            elif len(background.shape) == 1:
+            # if background is None:
+            #     pred_back, _, _ = self.renderer.render_multiple_view(self.env_sphere,
+            #                                                        background_sphere_colors,
+            #                                                        elev=theta,
+            #                                                        azim=phi,
+            #                                                        radius=radius,
+            #                                                        dims=dims,
+            #                                                        look_at_height=self.dy, calc_depth=False)
+            if len(background.shape) == 1:
                 pred_back = torch.ones_like(pred_features) * background.reshape(1, 3, 1, 1)
             else:
                 pred_back = background
