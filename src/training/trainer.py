@@ -413,7 +413,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -522,7 +522,7 @@ class ConTEXTure:
                         "control_depth": depth_tensor #depth_grid.half()
                     }
 
-                    noise_pred = unet(
+                    v_pred = unet(
                         latent_model_input, t, 
                         encoder_hidden_states=final_encoder_hidden_states,
                         cross_attention_kwargs=cross_attention_kwargs,
@@ -530,19 +530,18 @@ class ConTEXTure:
                     )[0]
                 
                     # Perform guidance
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
                     guidance_scale = 100
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
 
                 # JA: Calculate SDS loss gradient
-                # scaling_factor = 1 / torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device)
-                # loss = ((scaling_factor * (noise_pred - noise)) ** 2).mean()
-
-                # pred_x0 = (latents_noisy - sqrt_one_minus_alpha_t * noise_pred) / alphas_cumprod[index].sqrt()
+                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
+                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
+                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean
 
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                grad = grad_scale * w[:, None, None, None] * (noise_pred - noise)
+                grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)
                 grad = torch.nan_to_num(grad)
 
                 # 2. Define the target latent
@@ -550,17 +549,31 @@ class ConTEXTure:
 
                 # 3. Calculate the MSE loss
                 loss = 0.5 * F.mse_loss(
-                    unscale_latents(scaled_latents_clean).float(),
-                    unscale_latents(targets),
+                    scaled_latents_clean.float(),
+                    targets,
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
-                # loss = loss.float()
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
+
+                if i % 50 == 0:
+                    # Get the gradient of the last layer of your MLP
+                    final_layer = list(self.mesh_model.texture_mlp.parameters())[-2] # Usually the weight, not the bias
+                    
+                    if final_layer.grad is not None:
+                        grad_norm = final_layer.grad.norm().item()
+                        logits = outputs['mlp_output']
+                        
+                        # Log the values
+                        logger.info(f"--- Iteration {i} Debug Info ---")
+                        logger.info(f"Logits > min: {logits.min().item():.2f}, max: {logits.max().item():.2f}, mean: {logits.mean().item():.2f}")
+                        logger.info(f"Gradient Norm of Final Layer: {grad_norm}")
+                        logger.info(f"---------------------------------")
 
                 optimizer.step()
 
-                if i % 100 == 0 and i > 0:
+                if (i % 10 == 0 and i < 1000) or (i % 100 == 0):
                     self.log_texture_map(i)
                     self.log_train_image((unscale_image(rendered_grid_clean) + 1) / 2, f'rendered_grid_clean_{i}')
 
@@ -962,7 +975,8 @@ class ConTEXTure:
 
         # Get the texture map from the 2D NeRF
         with torch.no_grad():
-            texture_tensor = self.mesh_model.get_texture_map()
+            texture_tensor, _ = self.mesh_model.get_texture_map()
+            # texture_tensor = (texture_tensor + 1) / 2
             
         # [cite_start]Convert tensor to a NumPy array in the HWC format [cite: 399]
         # The get_texture_map() returns (1, 3, H, W)
