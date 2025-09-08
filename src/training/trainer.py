@@ -557,20 +557,6 @@ class ConTEXTure:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
 
-                if i % 50 == 0:
-                    # Get the gradient of the last layer of your MLP
-                    final_layer = list(self.mesh_model.texture_mlp.parameters())[-2] # Usually the weight, not the bias
-                    
-                    if final_layer.grad is not None:
-                        grad_norm = final_layer.grad.norm().item()
-                        logits = outputs['mlp_output']
-                        
-                        # Log the values
-                        logger.info(f"--- Iteration {i} Debug Info ---")
-                        logger.info(f"Logits > min: {logits.min().item():.2f}, max: {logits.max().item():.2f}, mean: {logits.mean().item():.2f}")
-                        logger.info(f"Gradient Norm of Final Layer: {grad_norm}")
-                        logger.info(f"---------------------------------")
-
                 optimizer.step()
 
                 if (i % 10 == 0 and i < 1000) or (i % 100 == 0):
