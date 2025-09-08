@@ -272,7 +272,8 @@ class TexturedMeshModel(nn.Module):
             indexing='xy'), dim=-1).reshape(-1, 2)
         
         embedded_uvs = self.uv_embedder(uv_coords_flat)
-        texture_colors = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
+        mlp_output = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
+        texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
         
         return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2)
 
@@ -321,24 +322,6 @@ class TexturedMeshModel(nn.Module):
             final_image[mask] = colors
         
         return final_image.permute(2, 0, 1).unsqueeze(0)
-
-    # def init_paint(self, num_backgrounds=1):
-    #     # random color face attributes for background sphere
-    #     init_background_bases = torch.rand(num_backgrounds, 3).to(self.device)
-    #     modulated_init_background_bases_latent = init_background_bases[:, None, None, :] * 0.8 + 0.2 * torch.randn(
-    #         num_backgrounds, self.env_sphere.faces.shape[0],
-    #         3, self.num_features, dtype=torch.float32).cuda()
-    #     background_sphere_colors = nn.Parameter(modulated_init_background_bases_latent.cuda())
-
-    #     if self.initial_texture_path is not None:
-    #         texture = torch.Tensor(np.array(Image.open(self.initial_texture_path).resize(
-    #             (self.texture_resolution, self.texture_resolution)))).permute(2, 0, 1).cuda().unsqueeze(0) / 255.0
-    #     else: # JA: This is the case in our experiment
-    #         texture = torch.ones(1, 3, self.texture_resolution, self.texture_resolution).cuda() * torch.Tensor(
-    #             self.default_color).reshape(1, 3, 1, 1).cuda()
-    #     # texture_img = nn.Parameter(texture) # JA: In the NeRF version, texture_img is retrieved with get_texture_map
-    #     texture_img = None
-    #     return background_sphere_colors, texture_img
 
     def invert_color(self, color: torch.Tensor) -> torch.Tensor:
         # inverse linear approx to find latent
@@ -493,8 +476,6 @@ class TexturedMeshModel(nn.Module):
         else:
             batch_size = render_cache["uv_features"].shape[0]
 
-        # background_sphere_colors = self.background_sphere_colors[
-        #     torch.randint(0, self.background_sphere_colors.shape[0], (batch_size,))]
         texture_img = self.get_texture_map() #self.meta_texture_img if use_meta_texture else self.texture_img
 
         if self.augmentations:
@@ -502,22 +483,6 @@ class TexturedMeshModel(nn.Module):
         else:
             augmented_vertices = self.mesh.vertices
 
-        # if use_median: #MJ: check if the texture_img being learned is not so different from the default magenta color
-        #     diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
-        #         self.device)).abs().sum(axis=1)
-        #     default_mask = (diff < 0.1).float().unsqueeze(0)
-        #     median_color = texture_img[0, :].reshape(3, -1)[:, default_mask.flatten() == 0].mean(
-        #         axis=1)  #MJ: get the median color of the non-magenta region of texture_img
-        #     texture_img = texture_img.clone()
-        #     with torch.no_grad(): #MJ: fill the default (magenta) region of texture_img by the median color
-        #         texture_img.reshape(3, -1)[:, default_mask.flatten() == 1] = median_color.reshape(-1, 1)
-                
-        #MJ:  When rendering images, having large patches of a default or placeholder color (like magenta) 
-        #  can be visually jarring and unrealistic. By filling these regions with a median color derived
-        #  from the actual textured parts of the image, the overall appearance becomes more cohesive 
-        #  and aesthetically pleasing. This helps in creating a more seamless and realistic image,
-        #  especially in contexts  where the texture details are crucial, such as in photorealistic rendering.  
-        
         #==>
         # Coverage Gaps: Despite the intention to cover the entire texture map with data from various 
         # viewpoints, gaps can occur. This might be due to occlusions, insufficient viewpoint coverage,

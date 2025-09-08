@@ -132,9 +132,7 @@ class NeRF2D(nn.Module):
         # In the original NeRF code, the sigmoid is in the raw2outputs function in run_nerf.py
         # https://github.com/yenchenlin/nerf-pytorch/blob/master/run_nerf.py
 
-        # return outputs
-        return torch.sigmoid(outputs)
-
+        return outputs
 
 
 # Ray helpers
