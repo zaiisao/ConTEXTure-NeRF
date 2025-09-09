@@ -70,7 +70,7 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-        self.uv_embedder, input_ch_uv = get_embedder(multires=8) 
+        self.uv_embedder, input_ch_uv = get_embedder(multires=10) 
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         self.texture_mlp = NeRF2D(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
@@ -88,8 +88,7 @@ class ConTEXTure:
         self.text_z, self.text_string = self.calc_text_embeddings()
         self.dataloaders = self.init_dataloaders()
         self.back_im = torch.Tensor(np.array(Image.open(self.cfg.guide.background_img).convert('RGB'))).to(
-            self.device).permute(2, 0,
-                                 1) / 255.0
+            self.device).permute(2, 0, 1) / 255.0
 
         self.zero123_front_input = None
         
@@ -500,8 +499,6 @@ class ConTEXTure:
 
                 scaled_latents_clean = scale_latents(latents_clean)
 
-                # index = num_timesteps - t.cpu().long() - 1
-
                 alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
                 sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
                 sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
@@ -531,7 +528,7 @@ class ConTEXTure:
                 
                     # Perform guidance
                     v_pred_uncond, v_pred_text = v_pred.chunk(2)
-                    guidance_scale = 100
+                    guidance_scale = 10
                     v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
 
                 # JA: Calculate SDS loss gradient
@@ -556,6 +553,20 @@ class ConTEXTure:
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
+
+                if i % 50 == 0:
+                    # Get the gradient of the last layer of your MLP
+                    final_layer = list(self.mesh_model.texture_mlp.parameters())[-2] # Usually the weight, not the bias
+                    
+                    if final_layer.grad is not None:
+                        grad_norm = final_layer.grad.norm().item()
+                        logits = outputs['mlp_output']
+                        
+                        # Log the values
+                        logger.info(f"--- Iteration {i} Debug Info ---")
+                        logger.info(f"Logits > min: {logits.min().item():.2f}, max: {logits.max().item():.2f}, mean: {logits.mean().item():.2f}")
+                        logger.info(f"Gradient Norm of Final Layer: {grad_norm}")
+                        logger.info(f"---------------------------------")
 
                 optimizer.step()
 

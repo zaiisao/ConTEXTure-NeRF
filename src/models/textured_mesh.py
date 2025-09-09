@@ -275,7 +275,7 @@ class TexturedMeshModel(nn.Module):
         mlp_output = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
         texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
         
-        return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2)
+        return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2), mlp_output
 
     def get_texture_map_only_valid_areas(self) -> torch.Tensor:
         """
@@ -337,7 +337,7 @@ class TexturedMeshModel(nn.Module):
         return init_color_in_latent
 
     def change_default_to_median(self):
-        texture_img = self.get_texture_map()
+        texture_img, _ = self.get_texture_map()
         diff = (texture_img - torch.tensor(self.default_color).view(1, 3, 1, 1).to(
             self.device)).abs().sum(axis=1)
         default_mask = (diff < 0.1).float().unsqueeze(0)
@@ -401,7 +401,7 @@ class TexturedMeshModel(nn.Module):
         v_np = v.cpu().numpy()  # [N, 3]
         f_np = f.cpu().numpy()  # [M, 3]
 
-        texture_img = self.get_texture_map()
+        texture_img, _ = self.get_texture_map()
         colors = texture_img.permute(0, 2, 3, 1).contiguous().clamp(0, 1)
 
         colors = colors[0].cpu().detach().numpy()
@@ -476,7 +476,7 @@ class TexturedMeshModel(nn.Module):
         else:
             batch_size = render_cache["uv_features"].shape[0]
 
-        texture_img = self.get_texture_map() #self.meta_texture_img if use_meta_texture else self.texture_img
+        texture_img, mlp_output = self.get_texture_map() #self.meta_texture_img if use_meta_texture else self.texture_img
 
         if self.augmentations:
             augmented_vertices = self.augment_vertices()
@@ -554,4 +554,4 @@ class TexturedMeshModel(nn.Module):
 
         return {'image': pred_map, 'mask': mask, 'background': pred_back,
                 'foreground': pred_features, 'depth': depth, 'normals': normals, 'render_cache': render_cache,
-                'texture_map': texture_img}
+                'texture_map': texture_img, 'mlp_output': mlp_output}
