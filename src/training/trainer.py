@@ -70,7 +70,7 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-        self.uv_embedder, input_ch_uv = get_embedder(multires=10) 
+        self.uv_embedder, input_ch_uv = get_embedder(multires=16) 
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         self.texture_mlp = NeRF2D(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
@@ -412,7 +412,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=5e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -494,7 +494,7 @@ class ConTEXTure:
                 rendered_grid_clean = rendered_grid_clean * 2 - 1
                 rendered_grid_clean = scale_image(rendered_grid_clean)
 
-                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample()
+                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample() #MJ: z0 = latents_clean
                 latents_clean = latents_clean * vae.config.scaling_factor
 
                 scaled_latents_clean = scale_latents(latents_clean)
@@ -507,8 +507,8 @@ class ConTEXTure:
                     noise = torch.randn_like(scaled_latents_clean)
 
                     # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
-                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise
-                    latents_noisy = latents_noisy.half()
+                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise #MJ: zt = latents_noisy
+                    latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
                     latent_model_input = torch.cat([latents_noisy] * 2)
                     latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
@@ -534,20 +534,23 @@ class ConTEXTure:
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
-                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean
-
+                
+                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
+                #MJ: v  = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean: v is not the target
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)
+                grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v_target)
+                # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
+                #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
                 grad = torch.nan_to_num(grad)
 
-                # 2. Define the target latent
+                # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
-                # 3. Calculate the MSE loss
+                # 3. Calculate the MSE loss: dloss/dtheta
                 loss = 0.5 * F.mse_loss(
-                    scaled_latents_clean.float(),
-                    targets,
+                    scaled_latents_clean.float(), #MJ: z0 = scaled_latents_clean
+                    targets,                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
