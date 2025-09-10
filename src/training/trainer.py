@@ -70,8 +70,12 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
+<<<<<<< HEAD
         
         self.uv_embedder, input_ch_uv = get_embedder(multires=10) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+=======
+        self.uv_embedder, input_ch_uv = get_embedder(multires=16) 
+>>>>>>> f8b36eae134b234953459cfae26f80c5f504fcfd
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         
@@ -523,7 +527,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=5e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -662,7 +666,11 @@ class ConTEXTure:
                 targets = (scaled_latents_clean - grad).float().detach()
 
                 # 3. Calculate the MSE loss: dloss/dtheta
+<<<<<<< HEAD
                 sds_loss = 0.5 * F.mse_loss(
+=======
+                loss = 0.5 * F.mse_loss(
+>>>>>>> f8b36eae134b234953459cfae26f80c5f504fcfd
                     scaled_latents_clean.float(), #MJ: z0 = scaled_latents_clean
                     targets,                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     reduction='sum'

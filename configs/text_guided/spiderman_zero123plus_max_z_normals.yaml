@@ -1,16 +1,3 @@
-# log:
-#   exp_name: spiderman_0123plus_learn_max_z_normals
-# guide:
-#   text: "A photo of Spiderman, {} view"
-#   append_direction: True
-#   shape_path: shapes/human.obj
-#   guidance_scale: 10
-#   use_zero123plus: True
-# optim:
-#   seed: 100
-#   learn_max_z_normals: True
-#   alpha:               -10
-
 log:
   exp_name: spiderman_0123plus_learn_max_z_normals
 guide:
