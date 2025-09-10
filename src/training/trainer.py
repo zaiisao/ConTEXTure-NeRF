@@ -365,6 +365,113 @@ class ConTEXTure:
             cropped_rgb_renders_list.append(cropped_rgb_render)
 
         return cropped_rgb_renders_list
+    
+    def compute_view_consistency_loss(self, rendered_images, raw_depth_maps, camera_transform):
+        num_views, _, H, W = rendered_images.shape
+
+        y, x = torch.meshgrid(
+            torch.arange(H, device=self.device, dtype=torch.float32),
+            torch.arange(W, device=self.device, dtype=torch.float32),
+            indexing='ij'
+        )
+
+        p = torch.stack([x, y, torch.ones_like(x)], dim=-1)
+
+        K = torch.zeros((3, 3), device=self.device)
+        K[:2, :2] = torch.diag(torch.mul(
+            self.mesh_model.renderer.camera_projection[:2, 0],
+            torch.tensor((W / 2, H / 2,), device=self.device)
+        ))
+        K[:2, -1] = torch.tensor(self.mesh_model.renderer.dim, device=self.device) / 2
+        K[2, 2] = 1
+        K_inv = torch.inverse(K).to(self.device)
+        
+        loss = 0.0
+        num_pairs = 0
+
+        for i in range(num_views):
+            for j in range(i + 1, num_views):
+                # JA: camera_transform is a camera transformation matrix returned by generate_transformation_matrix with the shape (B, 4, 3).
+                # The first three rows consist of the camera rotation matrices R_i, and the last row is the camera translation vector t_i
+                R_i = camera_transform[i, :3, :3]
+                t_i = camera_transform[i, 3, :3]
+
+                # JA: Get the depth of each pixel in view i (there is only one channel in the depth maps)
+                depth_i = raw_depth_maps[i, 0]
+                valid_mask_i = depth_i != 0 # JA: Valid pixels are those not on the background
+                
+                if not valid_mask_i.any():
+                    continue
+                
+                # Unproject 2D pixel coordinates to 3D camera coordinates
+                p_i_cam = p[valid_mask_i] @ K_inv.T # Shape: [N_valid, 3]
+                p_i_cam = p_i_cam * depth_i[valid_mask_i].unsqueeze(-1)
+                
+                # Transform from camera coordinates to world coordinates
+                p_3d = (p_i_cam - t_i) @ R_i # Transposing R_i is the inverse rotation
+                
+                # --- Step 2: Project the 3D points into view j ---
+                
+                # Get world-to-camera matrix for view j
+                R_j = camera_transform[j, :3, :3]
+                t_j = camera_transform[j, 3, :3]
+
+                # Transform world coordinates to view j camera coordinates
+                p_j_cam = p_3d @ R_j.T + t_j
+                
+                # Project 3D camera coordinates to 2D pixel coordinates
+                # The formula is p_proj = K * p_cam
+                p_j_proj = p_j_cam @ K[:3, :3].T
+                
+                # Normalize by z to get final (u, v) coordinates
+                u = p_j_proj[..., 0] / p_j_proj[..., 2]
+                v = p_j_proj[..., 1] / p_j_proj[..., 2]
+
+                # Normalize u,v coordinates to be in [-1, 1] for grid_sample
+                u_norm = (2.0 * u / (W - 1)) - 1.0
+                v_norm = (2.0 * v / (H - 1)) - 1.0
+                
+                # `warp_ij(p)`: Sample the color from view j at the projected coordinates
+                grid = torch.stack([u_norm, v_norm], dim=-1).unsqueeze(0).unsqueeze(0) # Shape: [1, 1, N_valid, 2]
+                in_frame_mask = (u_norm > -1) & (u_norm < 1) & (v_norm > -1) & (v_norm < 1)
+                sampled_depth_j = F.grid_sample(
+                    raw_depth_maps[j].unsqueeze(0), # Depth map of view j
+                    grid,
+                    mode='nearest', # Use nearest to get a precise depth value
+                    padding_mode='zeros',
+                    align_corners=False
+                ).squeeze()
+                projected_depth_j = p_j_cam[..., 2]
+                tolerance = 0.05 
+                occlusion_mask = (torch.abs(projected_depth_j - sampled_depth_j) < tolerance) & (sampled_depth_j != 0)
+                mutual_visibility_mask = in_frame_mask & occlusion_mask
+                # print(torch.abs(projected_depth_j - sampled_depth_j).min(), torch.abs(projected_depth_j - sampled_depth_j).max())
+                if not mutual_visibility_mask.any():
+                    continue
+
+
+
+                warped_colors = F.grid_sample(
+                    rendered_images[j].unsqueeze(0),
+                    grid,
+                    mode='bilinear',
+                    padding_mode='border',
+                    align_corners=False
+                ).squeeze().T # Shape: [N_valid, 3]
+                
+                # Original colors from view i
+                original_colors = rendered_images[i].permute(1, 2, 0)[valid_mask_i][mutual_visibility_mask]
+                warped_colors = warped_colors[mutual_visibility_mask]
+
+                # --- Step 3: Compute Similarity Loss ---
+                # S_ij(p) = 1 - (1/3) * || X_i(p) - X_j(warp_ij(p)) ||
+                # We want to MINIMIZE the difference, so our loss is just the L1 norm
+                pair_loss = F.l1_loss(original_colors, warped_colors)
+                
+                loss += pair_loss
+                num_pairs += 1
+
+        return loss #/ num_pairs if num_pairs > 0 else 0.0
 
     def paint_zero123plus(self):
         """
@@ -383,10 +490,8 @@ class ConTEXTure:
             rgb_output_front, object_mask_front = self.paint_viewpoint(frontview_data, should_project_back=False)
 
         # Render all 7 views to get depth maps and object masks
-        outputs_all_views = self.mesh_model.render(
-            theta=self.thetas, phi=self.phis, radius=self.radii, 
-            background=background_gray, use_median=True
-        )
+        outputs_all_views = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii, background=background_gray)
+
         object_masks = outputs_all_views['mask']
         depth_maps = 1.0 - outputs_all_views['depth']
         render_cache = outputs_all_views['render_cache']
@@ -475,8 +580,11 @@ class ConTEXTure:
 
                 # --- Render Student and Prepare Latents ---
                 outputs = self.mesh_model.render(render_cache=render_cache, background=background_gray)
+                
+                camera_transform = outputs['render_cache']['camera_transform']
                 rendered_six_views_clean = outputs['image'][1:]
                 six_depth_maps = outputs['depth'][1:]
+                six_raw_depth_maps = outputs['render_cache']['raw_depth_map'][1:]
                 six_view_weights = self.view_weights[1:]
 
                 gray_bg = torch.full_like(rendered_six_views_clean, 0.5)
@@ -495,12 +603,12 @@ class ConTEXTure:
                     torch.cat((cropped_renders_small_list[0], cropped_renders_small_list[3]), dim=3),
                     torch.cat((cropped_renders_small_list[1], cropped_renders_small_list[4]), dim=3),
                     torch.cat((cropped_renders_small_list[2], cropped_renders_small_list[5]), dim=3),
-                ), dim=2)
+                ), dim=2) #MJ: The final tensor rendered_grid_clean will have a shape corresponding to a single image that contains a 3x2 grid of the original images
 
                 rendered_grid_clean = rendered_grid_clean * 2 - 1
                 rendered_grid_clean = scale_image(rendered_grid_clean)
 
-                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample()
+                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample() #MJ: z0 = latents_clean
                 latents_clean = latents_clean * vae.config.scaling_factor
 
                 scaled_latents_clean = scale_latents(latents_clean)
@@ -513,8 +621,8 @@ class ConTEXTure:
                     noise = torch.randn_like(scaled_latents_clean)
 
                     # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
-                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise
-                    latents_noisy = latents_noisy.half()
+                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise #MJ: zt = latents_noisy
+                    latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
                     latent_model_input = torch.cat([latents_noisy] * 2)
                     latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
@@ -542,23 +650,28 @@ class ConTEXTure:
                 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 
                 v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
-
+                #MJ: v  = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean: v is not the target
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
                 grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v_target)
-
+                # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
+                #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
                 grad = torch.nan_to_num(grad)
 
-                # 2. Define the target latent
+                # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
-                # 3. Calculate the MSE loss
-                loss = 0.5 * F.mse_loss(
-                    scaled_latents_clean.float(),
-                    targets,
+                # 3. Calculate the MSE loss: dloss/dtheta
+                sds_loss = 0.5 * F.mse_loss(
+                    scaled_latents_clean.float(), #MJ: z0 = scaled_latents_clean
+                    targets,                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
+
+                vc_loss = self.compute_view_consistency_loss(rendered_six_views_clean, six_raw_depth_maps.permute(0, 3, 1, 2), camera_transform)
+
+                loss = sds_loss + vc_loss
+                print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
@@ -840,109 +953,7 @@ class ConTEXTure:
 
     def print_hook(self, grad):
            print(f"Gradient: {grad}")  
-      
-    def project_back_max_z_normals(self):
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_max_z_normals(), lr=self.cfg.optim.lr, betas=(0.9, 0.99),
-                                        eps=1e-15)
 
-        #End  for v in range( len(self.thetas) )
-        with  tqdm(range(300), desc='project_back_max_z_normals:fitting max_z_normals') as pbar:
-            render_cache = None
-            for iter in pbar:
-                #MJ: Render the max_z_normals (self.meta_texure_img) which has been learned using the previous view z_normals
-                # At the beginning of the for loop, self.meta_texture_img is set to 0
-                if render_cache is None:
-                    meta_output = self.mesh_model.render(theta=self.thetas, phi=self.phis, radius=self.radii,
-                                                    background=torch.Tensor([0, 0, 0]).to(self.device),
-                                                            use_meta_texture=True, render_cache=None)
-                    render_cache = meta_output["render_cache"]
-                else:
-                    meta_output = self.mesh_model.render(background=torch.Tensor([0, 0, 0]).to(self.device), use_meta_texture=True, render_cache=render_cache)
-
-                max_z_normals_projected = meta_output['image'][:,0:1,:,:]
-                #MJ: meta_output['image'] is the projected meta_texture_img; The first channel refers to the max_z_normals in the current view
-                z_normals = meta_output['normals'][:,2:3,:,:]   #MJ: Get the z component of the face normal in the current view
-                #MJ: z_normals is the z component of the normal vectors of the faces seen by each view
-                z_normals_mask = meta_output['mask']   #MJ: shape = (1,1,1200,1200)
-                #MJ: Try blurring the object-mask "curr_z_mask" with Gaussian blurring:
-                # The following code is a simply  cut and paste from project-back:
-                object_mask = z_normals_mask
-                # #MJ: erode the boundary of the mask
-                # object_mask_v = torch.from_numpy( cv2.erode(object_mask_v[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8)) ).to(
-                #                      object_mask_v.device).unsqueeze(0).unsqueeze(0)
-                # # object_mask = torch.from_numpy(
-                # #     cv2.erode(object_mask[0, 0].detach().cpu().numpy(), np.ones((5, 5), np.uint8))).to(
-                # #     object_mask.device).unsqueeze(0).unsqueeze(0)
-                # # render_update_mask = object_mask.clone()
-                render_update_mask =  object_mask.clone()
-                # #MJ: dilate the bounary of the mask
-                # blurred_render_update_mask_v = torch.from_numpy(
-                #      cv2.dilate(render_update_mask_v[0, 0].detach().cpu().numpy(), np.ones((25, 25), np.uint8))).to(
-                #      render_update_mask_v.device).unsqueeze(0).unsqueeze(0)
-                # blurred_render_update_mask_v = utils.gaussian_blur(blurred_render_update_mask_v, 21, 16)
-                # # Do not get out of the object
-                # blurred_render_update_mask_v[object_mask_v == 0] = 0
-                max_z_normals_projected  = max_z_normals_projected.clone()  *    render_update_mask.float()
-                z_normals = z_normals.clone() *  render_update_mask.float()
-                delta =  max_z_normals_projected -   z_normals
-            # Compute the ReLU of the negative differences
-                loss_v = F.relu(-delta)  # Shape: (B, 1, h, w)
-                # Sum the loss over all pixels and add to total loss
-
-                total_loss = loss_v.sum()
-
-                optimizer.zero_grad()
-                total_loss.backward() # JA: Compute the gradient vector of the loss with respect 
-                                # to the trainable parameters of the network, that is, the pixel value of the
-                                # texture atlas
-                optimizer.step()
-
-                pbar.set_description(f"project_max_z_normals: Fitting z_normals -Epoch {iter}, Loss: {total_loss.item():.7f}")
-
-                if total_loss == 0:
-                    print(f"max_z_normals training reached 0 loss at epoch {iter}")
-                    break
-        #End for _ in tqdm(range(300), desc='fitting max_z_normals')
-                
-         
-    def compute_view_weights(self, z_normals, max_z_normals, alpha=-10.0 ):        
-        
-        """
-        Compute view weights where the weight increases exponentially as z_normals approach max_z_normals.
-        
-        Args:
-            z_normals (torch.Tensor): The tensor containing the z_normals data.
-            max_z_normals (torch.Tensor): The tensor containing the max_z_normals data.
-            alpha (float): A scaling parameter that controls how sharply the weight increases (should be negative).
-        
-        Returns:
-            torch.Tensor: The computed weights with the same shape as the input tensors (B, 1, H, W).
-        """
-        # Ensure inputs have the same shape
-        assert z_normals.shape == max_z_normals.shape, "Input tensors must have the same shape"
-        
-        # Compute the difference between max_z_normals and z_normals
-
-        delta = max_z_normals - z_normals
-        # for i in range( delta.shape[0]):
-        #     print(f'min delta for view-{i}:{delta[i].min()}')
-        #     print(f'max  delta for view-{i}:{delta[i].max()}')
-        #MJ: delta is supposed to be greater than 0; But sometimes, z_normals is greater than max_z_normals.
-        # It means that project_back_max_z_normals() was not fully successful.
-        
-        max_z_normals = torch.where( delta >=0, max_z_normals, z_normals)
-        delta_new = max_z_normals - z_normals
-        # Calculate the weights using an exponential function, multiplying by negative alpha
-        weights = torch.exp(alpha * delta_new)  #MJ: the max value of torch.exp(alpha * delta)   will be torch.exp(alpha * 0) = 1 
-        #debug: for i in range( weights.shape[0]):
-        #     print(f'min weights  for view-{i}:{weights[i].min()}')
-        #     print(f'max  weights for view-{i}:{weights[i].max()}')
-        # Normalize to have the desired shape (B, 1, H, W)
-        #weights = weights.view(weights.size(0), 1, weights.size(1), weights.size(2))
-        
-        return weights
-       
-    
     def log_train_image(self, tensor: torch.Tensor, name: str, colormap=False):
         if self.cfg.log.log_images:
             if colormap:
