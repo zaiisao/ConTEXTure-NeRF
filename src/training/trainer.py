@@ -70,16 +70,20 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-        self.uv_embedder, input_ch_uv = get_embedder(multires=10) 
+        
+        self.uv_embedder, input_ch_uv = get_embedder(multires=10) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
+        
         self.texture_mlp = NeRF2D(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
         if torch.cuda.device_count() > 1:
             self.texture_mlp = nn.DataParallel(self.texture_mlp)
 
         # You should also pass these new components to your mesh model
         self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
+        
         self.mesh_model = self.init_mesh_model(texture_mlp=self.texture_mlp, uv_embedder=self.uv_embedder)
+        
         self.diffusion = self.init_diffusion()
 
         if self.cfg.guide.use_zero123plus:
@@ -195,8 +199,10 @@ class ConTEXTure:
         cache_path = Path('cache') / Path(self.cfg.guide.shape_path).stem
         cache_path.mkdir(parents=True, exist_ok=True)
         model = TexturedMeshModel(self.cfg.guide,
+                                  
                                   texture_mlp=texture_mlp,
                                   uv_embedder=uv_embedder,
+                                  
                                   device=self.device,
                                   render_grid_size=self.cfg.render.train_grid_size,
                                   cache_path=cache_path,
@@ -534,11 +540,14 @@ class ConTEXTure:
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
-                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean
+                
+                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
 
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)
+                #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
+                grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v_target)
+
                 grad = torch.nan_to_num(grad)
 
                 # 2. Define the target latent
@@ -556,6 +565,8 @@ class ConTEXTure:
 
                 if i % 50 == 0:
                     # Get the gradient of the last layer of your MLP
+                    #MJ: The parameters list would be ordered as: [layer1_weights, layer1_bias, layer2_weights, layer2_bias, ..., final_layer_weights, final_layer_bias]. 
+                    # Therefore, [-2] correctly accesses the weights of the final layer
                     final_layer = list(self.mesh_model.texture_mlp.parameters())[-2] # Usually the weight, not the bias
                     
                     if final_layer.grad is not None:

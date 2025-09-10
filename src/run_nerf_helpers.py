@@ -21,25 +21,25 @@ class Embedder:
         embed_fns = []
         d = self.kwargs['input_dims']
         out_dim = 0
-        if self.kwargs['include_input']:
+        if self.kwargs['include_input']: #MJ: The raw input 𝑥 x itself is included in the embedding.
             embed_fns.append(lambda x : x)
             out_dim += d
             
         max_freq = self.kwargs['max_freq_log2']
-        N_freqs = self.kwargs['num_freqs']
+        N_freqs = self.kwargs['num_freqs']  #MJ: = 16
         
         if self.kwargs['log_sampling']:
             freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
         else:
             freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
             
-        for freq in freq_bands:
+        for freq in freq_bands: #MJ: For each frequency band and each periodic function (sin, cos)
             for p_fn in self.kwargs['periodic_fns']:
                 embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
                 out_dim += d
                     
         self.embed_fns = embed_fns
-        self.out_dim = out_dim
+        self.out_dim = out_dim  #MJ: out_dim=(include_input?d:0)+Nfreqs​×Np​×d
         
     def embed(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
@@ -55,7 +55,7 @@ def get_embedder(multires, i=0):
                 # 'input_dims' : 3,
                 'input_dims' : 2, # JA: 2 for UV coordinates
                 'max_freq_log2' : multires-1,
-                'num_freqs' : multires,
+                'num_freqs' : multires,  #MJ: = 16
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
     }

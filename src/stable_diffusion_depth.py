@@ -870,11 +870,11 @@ class StableDiffusion(nn.Module):
         # _t = time.time()
         if not self.latent_mode:
             # latents = F.interpolate(latents, (64, 64), mode='bilinear', align_corners=False)
-            pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear', align_corners=False)
-            latents = self.encode_imgs(pred_rgb_512)
+            pred_rgb_512 = F.interpolate(inputs, (512, 512), mode='bilinear', align_corners=False) #MJ: x0 = pred_rgb_512
+            latents = self.encode_imgs(pred_rgb_512)                                               #MJ: z0 = latents
             depth_mask = F.interpolate(depth_mask, size=(64, 64), mode='bicubic',
                                        align_corners=False)
-        else:
+        else: #MJ: inout is in latent space
             latents = inputs
 
         depth_mask = 2.0 * (depth_mask - depth_mask.min()) / (depth_mask.max() - depth_mask.min()) - 1.0
@@ -895,27 +895,27 @@ class StableDiffusion(nn.Module):
         # _t = time.time()
         with torch.no_grad():
             # add noise
-            if self.no_noise:
-                noise = torch.zeros_like(latents)
+            if self.no_noise: #MJ: What does it mean
+                noise = torch.zeros_like(latents) #MJ: noise is not used at all
                 latents_noisy = latents
             else:
                 noise = torch.randn_like(latents)
-                latents_noisy = self.scheduler.add_noise(latents, noise, t)
+                latents_noisy = self.scheduler.add_noise(latents, noise, t)   #MJ: z_t = latents_noisy 
             # pred noise
             latent_model_input = torch.cat([latents_noisy] * 2)
             # add depth
             latent_model_input = torch.cat([latent_model_input, depth_mask], dim=1)
-            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
+            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample #MJ: eps_phi (zt,t)  =  noise_pred
         # torch.cuda.synchronize(); print(f'[TIME] guiding: unet {time.time() - _t:.4f}s')
 
         # perform guidance (high scale from paper!)
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond) #MJ:  guidance_scale=100
 
         # w(t), alpha_t * sigma_t^2
         w = (1 - self.alphas[t])
         # w = self.alphas[t] ** 0.5 * (1 - self.alphas[t])
-        grad = w * (noise_pred - noise)
+        grad = w * (noise_pred - noise)  #MJ: grad  = w * (eps_phi - eps_theta)
 
         # clip grad for stable training?
         # grad = grad.clamp(-1, 1)

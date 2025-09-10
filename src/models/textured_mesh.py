@@ -271,7 +271,30 @@ class TexturedMeshModel(nn.Module):
             torch.linspace(0, 1, res, device=self.device), 
             indexing='xy'), dim=-1).reshape(-1, 2)
         
+        # 1. Create a second set of UVs rotated by 45 degrees
+        # theta = torch.tensor(np.pi / 4, device=self.device) # 45 degrees
+        # rot_matrix = torch.tensor([
+        #     [torch.cos(theta), -torch.sin(theta)],
+        #     [torch.sin(theta), torch.cos(theta)]
+        # ], device=self.device, dtype=torch.float32)
+        
+        # # Center coords around 0, rotate, then shift back to [0, 1] range
+        # uv_coords_centered = uv_coords - 0.5
+        # uv_coords_rotated = uv_coords_centered @ rot_matrix.T
+        # uv_coords_rotated = uv_coords_rotated + 0.5
+        
+        # # 2. Embed both original and rotated coordinates
+        # uv_coords_flat = uv_coords.reshape(-1, 2)
+        # uv_coords_rotated_flat = uv_coords_rotated.reshape(-1, 2)
+
+        # embedded_uvs = self.uv_embedder(uv_coords_flat)
+        # embedded_uvs_rotated = self.uv_embedder(uv_coords_rotated_flat)
         embedded_uvs = self.uv_embedder(uv_coords_flat)
+
+        # combined_features = torch.cat([embedded_uvs, embedded_uvs_rotated], dim=-1)
+
+        # mlp_output = self.texture_mlp(combined_features)
+
         mlp_output = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
         texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
         
