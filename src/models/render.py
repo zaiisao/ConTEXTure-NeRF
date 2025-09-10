@@ -101,7 +101,6 @@ class Renderer:
         dims = self.dim if dims is None else dims
 
         if render_cache is None:
-
             camera_transform = self.get_camera_from_multiple_view(
                 elev, azim, r=radius,
                 look_at_height=look_at_height
@@ -110,9 +109,9 @@ class Renderer:
             face_vertices_camera, face_vertices_image, face_normals = kal.render.mesh.prepare_vertices(
                 verts, faces, self.camera_projection, camera_transform=camera_transform)
             # JA: face_vertices_camera[:, :, :, -1] likely refers to the z-component (depth component) of these coordinates, used both for depth mapping and for determining how textures map onto the surfaces during UV feature generation.
-            depth_map, _ = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
+            raw_depth_map, _ = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
                                                               face_vertices_image, face_vertices_camera[:, :, :, -1:]) 
-            depth_map = self.normalize_multiple_depth(depth_map)
+            depth_map = self.normalize_multiple_depth(raw_depth_map)
 
             uv_features, face_idx = kal.render.mesh.rasterize(dims[1], dims[0], face_vertices_camera[:, :, :, -1],
                 face_vertices_image, uv_face_attr)
@@ -120,7 +119,13 @@ class Renderer:
 
         else:
             # logger.info('Using render cache')
-            face_normals, uv_features, face_idx, depth_map = render_cache['face_normals'], render_cache['uv_features'], render_cache['face_idx'], render_cache['depth_map']
+            camera_transform = render_cache['camera_transform']
+            face_normals = render_cache['face_normals']
+            uv_features = render_cache['uv_features']
+            face_idx = render_cache['face_idx']
+            depth_map = render_cache['depth_map']
+            raw_depth_map = render_cache['raw_depth_map']
+
         mask = (face_idx > -1).float()[..., None]
         #MJ: uv_features: shape =(7,1200,1200,2); texture_map:shape = (7,3,1200,1200)
         image_features = kal.render.mesh.texture_mapping(uv_features, texture_map, mode=self.interpolation_mode)
@@ -148,10 +153,12 @@ class Renderer:
         normals_image = face_normals[batch_indices, face_idx]
 
         render_cache = {
+            'camera_transform': camera_transform,
             'uv_features': uv_features,
             'face_normals': face_normals,
             'face_idx': face_idx,
-            'depth_map': depth_map
+            'depth_map': depth_map,
+            'raw_depth_map': raw_depth_map
         }
 
         return image_features.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2),\
