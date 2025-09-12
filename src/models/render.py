@@ -125,6 +125,7 @@ class Renderer:
             face_idx = render_cache['face_idx']
             depth_map = render_cache['depth_map']
             raw_depth_map = render_cache['raw_depth_map']
+            face_vertices_image = render_cache['face_vertices_image']
 
         mask = (face_idx > -1).float()[..., None]
         #MJ: uv_features: shape =(7,1200,1200,2); texture_map:shape = (7,3,1200,1200)
@@ -158,7 +159,8 @@ class Renderer:
             'face_normals': face_normals,
             'face_idx': face_idx,
             'depth_map': depth_map,
-            'raw_depth_map': raw_depth_map
+            'raw_depth_map': raw_depth_map,
+            'face_vertices_image': face_vertices_image
         }
 
         return image_features.permute(0, 3, 1, 2), mask.permute(0, 3, 1, 2),\

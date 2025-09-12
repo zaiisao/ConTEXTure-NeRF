@@ -70,12 +70,8 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-<<<<<<< HEAD
         
         self.uv_embedder, input_ch_uv = get_embedder(multires=10) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
-=======
-        self.uv_embedder, input_ch_uv = get_embedder(multires=16) 
->>>>>>> f8b36eae134b234953459cfae26f80c5f504fcfd
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         
@@ -369,113 +365,110 @@ class ConTEXTure:
             cropped_rgb_renders_list.append(cropped_rgb_render)
 
         return cropped_rgb_renders_list
-    
-    def compute_view_consistency_loss(self, rendered_images, raw_depth_maps, camera_transform):
-        num_views, _, H, W = rendered_images.shape
 
-        y, x = torch.meshgrid(
-            torch.arange(H, device=self.device, dtype=torch.float32),
-            torch.arange(W, device=self.device, dtype=torch.float32),
-            indexing='ij'
-        )
+    def compute_view_consistency(self, rendered_views, faces, all_face_idx, all_face_vertices_image):
+        num_views, C, h, w = rendered_views.shape
+        num_vertices = faces.max().item() + 1
 
-        p = torch.stack([x, y, torch.ones_like(x)], dim=-1)
-
-        K = torch.zeros((3, 3), device=self.device)
-        K[:2, :2] = torch.diag(torch.mul(
-            self.mesh_model.renderer.camera_projection[:2, 0],
-            torch.tensor((W / 2, H / 2,), device=self.device)
-        ))
-        K[:2, -1] = torch.tensor(self.mesh_model.renderer.dim, device=self.device) / 2
-        K[2, 2] = 1
-        K_inv = torch.inverse(K).to(self.device)
-        
-        loss = 0.0
-        num_pairs = 0
+        # Create the vertex-to-pixel lookup map for coordinate mapping
+        # JA: Create a map to project all faces to their pixel coordinates
+        vertex_to_pixel_map = torch.full((num_views, num_vertices, 2), -1, dtype=torch.long, device=self.device)
+        flat_faces = faces.flatten()
 
         for i in range(num_views):
-            for j in range(i + 1, num_views):
-                # JA: camera_transform is a camera transformation matrix returned by generate_transformation_matrix with the shape (B, 4, 3).
-                # The first three rows consist of the camera rotation matrices R_i, and the last row is the camera translation vector t_i
-                R_i = camera_transform[i, :3, :3]
-                t_i = camera_transform[i, 3, :3]
+            # JA: face_vertices_image is provided by prepare_vertices and refers to the vertices' pixel positions.
+            # Because it has a shape of (B, F, 3, 2), the 3 refers to the positions of the three vertices that make
+            # up a single face, and the 2 refers to the pixel coordinate in normalized space [-1, 1]
 
-                # JA: Get the depth of each pixel in view i (there is only one channel in the depth maps)
-                depth_i = raw_depth_maps[i, 0]
-                valid_mask_i = depth_i != 0 # JA: Valid pixels are those not on the background
-                
-                if not valid_mask_i.any():
-                    continue
-                
-                # Unproject 2D pixel coordinates to 3D camera coordinates
-                p_i_cam = p[valid_mask_i] @ K_inv.T # Shape: [N_valid, 3]
-                p_i_cam = p_i_cam * depth_i[valid_mask_i].unsqueeze(-1)
-                
-                # Transform from camera coordinates to world coordinates
-                p_3d = (p_i_cam - t_i) @ R_i # Transposing R_i is the inverse rotation
-                
-                # --- Step 2: Project the 3D points into view j ---
-                
-                # Get world-to-camera matrix for view j
-                R_j = camera_transform[j, :3, :3]
-                t_j = camera_transform[j, 3, :3]
+            # JA: Change domain of coordinates [-1, 1] -> [0, 1] -> [0, W (or H)]
+            coords_normalized = (all_face_vertices_image[i].reshape(-1, 2) + 1) / 2
 
-                # Transform world coordinates to view j camera coordinates
-                p_j_cam = p_3d @ R_j.T + t_j
-                
-                # Project 3D camera coordinates to 2D pixel coordinates
-                # The formula is p_proj = K * p_cam
-                p_j_proj = p_j_cam @ K[:3, :3].T
-                
-                # Normalize by z to get final (u, v) coordinates
-                u = p_j_proj[..., 0] / p_j_proj[..., 2]
-                v = p_j_proj[..., 1] / p_j_proj[..., 2]
+            coords_xy = (coords_normalized * torch.tensor([w, h], device=self.device, dtype=torch.float32)).long()
+            coords_yx = coords_xy[:, [1, 0]]
+            vertex_to_pixel_map[i, flat_faces] = coords_yx
 
-                # Normalize u,v coordinates to be in [-1, 1] for grid_sample
-                u_norm = (2.0 * u / (W - 1)) - 1.0
-                v_norm = (2.0 * v / (H - 1)) - 1.0
-                
-                # `warp_ij(p)`: Sample the color from view j at the projected coordinates
-                grid = torch.stack([u_norm, v_norm], dim=-1).unsqueeze(0).unsqueeze(0) # Shape: [1, 1, N_valid, 2]
-                in_frame_mask = (u_norm > -1) & (u_norm < 1) & (v_norm > -1) & (v_norm < 1)
-                sampled_depth_j = F.grid_sample(
-                    raw_depth_maps[j].unsqueeze(0), # Depth map of view j
-                    grid,
-                    mode='nearest', # Use nearest to get a precise depth value
-                    padding_mode='zeros',
-                    align_corners=False
-                ).squeeze()
-                projected_depth_j = p_j_cam[..., 2]
-                tolerance = 0.05 
-                occlusion_mask = (torch.abs(projected_depth_j - sampled_depth_j) < tolerance) & (sampled_depth_j != 0)
-                mutual_visibility_mask = in_frame_mask & occlusion_mask
-                # print(torch.abs(projected_depth_j - sampled_depth_j).min(), torch.abs(projected_depth_j - sampled_depth_j).max())
-                if not mutual_visibility_mask.any():
+        # JA: vertex_visiblity is a visibility map for each vertex for all views. This information can be extracted
+        # from retrieving face_idx, which is provided by the rasterize function
+        vertex_visibility = torch.zeros((num_vertices, num_views), dtype=torch.bool, device=self.device)
+        for j in range(num_views):
+            visible_faces_in_view = torch.unique(all_face_idx[j])
+            visible_faces_in_view = visible_faces_in_view[visible_faces_in_view != -1]
+            if visible_faces_in_view.numel() > 0:
+                visible_vertices = faces[visible_faces_in_view].flatten()
+                vertex_visibility[visible_vertices, j] = True
+
+        visibility_mask_tensor = torch.zeros((num_views, num_views, h, w), dtype=torch.bool, device=self.device)
+        coord_map_tensor = torch.full((num_views, num_views, h, w, 2), -1, dtype=torch.long, device=self.device)
+        color_diff_tensor = torch.full((num_views, num_views, h, w), -1.0, dtype=torch.float32, device=self.device)
+
+        # JA: Here, j is the source view index where the visibility information is retrived from, and i is the
+        # target view which is the view we are creating a mask for
+        for j in range(num_views):
+            is_visible_in_view_j = vertex_visibility[:, j]
+            source_image_j = rendered_views[j]
+
+            for i in range(num_views):
+                # JA: If the target view i does not have any valid face indices (that is, there are no valid pixels),
+                # then it should skip this view. This usually should not be the case.
+                target_view_face_idx = all_face_idx[i]
+                valid_pixels = target_view_face_idx != -1
+                if not torch.any(valid_pixels):
                     continue
 
+                # JA: The faces can be retrieved based on the valid pixels of view i, and these faces can be used to
+                # check if they are also visible in view j
+                pixel_vertices = faces[target_view_face_idx[valid_pixels]]
+                pixel_vertex_status = is_visible_in_view_j[pixel_vertices]
+                has_shared_vertex = torch.any(pixel_vertex_status, dim=1)
 
+                # JA: Create a mask displaying parts of the mesh from view i that are also visible in view j
+                pairwise_mask = torch.zeros((h, w), dtype=torch.bool, device=self.device)
+                pairwise_mask[valid_pixels] = has_shared_vertex
+                visibility_mask_tensor[j, i] = pairwise_mask
 
-                warped_colors = F.grid_sample(
-                    rendered_images[j].unsqueeze(0),
-                    grid,
-                    mode='bilinear',
-                    padding_mode='border',
-                    align_corners=False
-                ).squeeze().T # Shape: [N_valid, 3]
+                if not torch.any(has_shared_vertex):
+                    continue # JA: No shared pixels, so no coordinates to map
+
+                # Find representative vertices ONLY for the shared pixels
+                first_visible_v_idx = torch.argmax(pixel_vertex_status[has_shared_vertex].int(), dim=1)
+                num_shared_pixels = has_shared_vertex.sum()
+                representative_v_ids = pixel_vertices[has_shared_vertex][torch.arange(num_shared_pixels), first_visible_v_idx]
+
+                # Look up their coordinates in the source view `j`
+                corresponding_coords = vertex_to_pixel_map[j, representative_v_ids]
                 
-                # Original colors from view i
-                original_colors = rendered_images[i].permute(1, 2, 0)[valid_mask_i][mutual_visibility_mask]
-                warped_colors = warped_colors[mutual_visibility_mask]
-
-                # --- Step 3: Compute Similarity Loss ---
-                # S_ij(p) = 1 - (1/3) * || X_i(p) - X_j(warp_ij(p)) ||
-                # We want to MINIMIZE the difference, so our loss is just the L1 norm
-                pair_loss = F.l1_loss(original_colors, warped_colors)
+                # Get the (y,x) locations of the shared pixels to place the new coords
+                shared_pixel_locations = valid_pixels.nonzero(as_tuple=False)[has_shared_vertex]
+                y_indices, x_indices = shared_pixel_locations[:, 0], shared_pixel_locations[:, 1]
                 
-                loss += pair_loss
-                num_pairs += 1
+                coord_map_tensor[j, i, y_indices, x_indices] = corresponding_coords
 
-        return loss #/ num_pairs if num_pairs > 0 else 0.0
+                # Get the target image for this specific pair
+                target_image_i = rendered_views[i]
+                
+                # Get coordinates for source and target pixels
+                source_y, source_x = corresponding_coords[:, 0], corresponding_coords[:, 1]
+                target_y, target_x = y_indices, x_indices
+                
+                gathered_colors = source_image_j[:, source_y, source_x]
+                target_colors = target_image_i[:, target_y, target_x]
+
+                diff = 1 - torch.abs(target_colors.float() - gathered_colors.float()).sum(dim=0) / C
+                
+                color_diff_tensor[j, i, target_y, target_x] = diff
+
+        pair_mask = ~torch.eye(num_views, num_views, dtype=torch.bool, device=self.device)
+        relevant_similarities = color_diff_tensor[pair_mask]
+
+        valid_similarity_values = relevant_similarities[relevant_similarities >= 0]
+
+        if valid_similarity_values.numel() > 0:
+            mean_similarity = torch.mean(valid_similarity_values)
+        else:
+            # If no pixels overlap, there is no inconsistency, so the similarity is 0.
+            mean_similarity = torch.tensor(0.0, device=self.device)
+
+        return mean_similarity
 
     def paint_zero123plus(self):
         """
@@ -527,7 +520,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=5e-4, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -571,10 +564,16 @@ class ConTEXTure:
 
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-        epochs = 30000
+        iterations = 15000
+        ikl_running_avg = None
+
+        import wandb
+        run = wandb.init(
+            project="ConTEXTure-NeRF"
+        )
 
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
-        with tqdm(range(epochs), desc='SDS Texture Optimization') as pbar:
+        with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
                 t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
@@ -653,11 +652,29 @@ class ConTEXTure:
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 
-                v_target = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
-                #MJ: v  = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean: v is not the target
+                v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
+                with torch.no_grad():
+                    # Calculate the Fisher Divergence, which is the squared distance between the scores.
+                    # For v-prediction, the score difference is (v_pred - v) / (alpha_t * sigma_t)
+                    # alpha_t = sqrt_alphas_cumprod
+                    # sigma_t = sqrt_one_minus_alphas_cumprod
+                    
+                    # Avoid division by zero at t=0
+                    sigma_t = sqrt_one_minus_alphas_cumprod.clamp(min=1e-8)
+                    alpha_t = sqrt_alphas_cumprod.clamp(min=1e-8)
+
+                    divergence_at_t = torch.sum(((v_pred.detach() - v.detach()) / (alpha_t * sigma_t)) ** 2)
+
+                    # Update the running average (Exponential Moving Average)
+                    if ikl_running_avg is None:
+                        ikl_running_avg = divergence_at_t.item()
+                    else:
+                        beta = 0.99  # Smoothing factor
+                        ikl_running_avg = beta * ikl_running_avg + (1 - beta) * divergence_at_t.item()
+
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v_target)
+                grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
                 # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
                 #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
                 grad = torch.nan_to_num(grad)
@@ -666,23 +683,38 @@ class ConTEXTure:
                 targets = (scaled_latents_clean - grad).float().detach()
 
                 # 3. Calculate the MSE loss: dloss/dtheta
-<<<<<<< HEAD
                 sds_loss = 0.5 * F.mse_loss(
-=======
-                loss = 0.5 * F.mse_loss(
->>>>>>> f8b36eae134b234953459cfae26f80c5f504fcfd
                     scaled_latents_clean.float(), #MJ: z0 = scaled_latents_clean
                     targets,                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
-                vc_loss = self.compute_view_consistency_loss(rendered_six_views_clean, six_raw_depth_maps.permute(0, 3, 1, 2), camera_transform)
+                consistency_reward = self.compute_view_consistency(
+                    rendered_six_views_clean,
+                    self.mesh_model.mesh.faces,
+                    render_cache['face_idx'][1:],
+                    render_cache['face_vertices_image'][1:]
+                )
 
-                loss = sds_loss + vc_loss
-                print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
+                loss = sds_loss - 500 * consistency_reward
+                # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
+
+                grad_vector = torch.nn.utils.parameters_to_vector(
+                    p.grad for p in self.mesh_model.texture_mlp.parameters() if p.grad is not None
+                )
+
+                grad_norm = torch.linalg.norm(grad_vector)
+
+                wandb.log({
+                    "grad_norm": grad_norm,
+                    "divergence_at_t": divergence_at_t,
+                    "ikl_running_avg": ikl_running_avg,
+                    "sds_loss": sds_loss,
+                    "consistency_reward": consistency_reward
+                })
 
                 if i % 50 == 0:
                     # Get the gradient of the last layer of your MLP
