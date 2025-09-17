@@ -50,6 +50,61 @@ def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
 
+class DreamTimeScheduler:
+    def __init__(self, alphas_cumprod, total_iterations, m=500, s=125):
+        """
+        Initializes the Time Prioritized SDS scheduler.
+
+        Args:
+            alphas_cumprod (torch.Tensor): The cumulative product of alphas from the diffusion model.
+            total_iterations (int): The total number of training iterations (N).
+            m (int): The mean (center) of the Gaussian perception prior.
+            s (int): The standard deviation of the Gaussian perception prior.
+        """
+        self.device = alphas_cumprod.device
+        self.total_iterations = total_iterations
+        self.T = len(alphas_cumprod)
+
+        # Pre-compute the weights W(t) for all timesteps t in [0, T-1]
+        
+        # 1. Diffusion Prior W_d(t) based on SNR (Eq. 6-7, Source 313, 317)
+        snr = alphas_cumprod / (1 - alphas_cumprod)
+        w_d = torch.sqrt(1 / snr)
+
+        # 2. Perception Prior W_p(t), a Gaussian bell curve (Source 417)
+        timesteps = torch.arange(self.T, device=self.device)
+        w_p = torch.exp(-0.5 * ((timesteps - m) / s) ** 2)
+
+        # 3. Combined weights W(t) (Source 403)
+        weights = w_d * w_p
+        
+        # 4. Normalize the weights to sum to 1
+        weights /= weights.sum()
+
+        # 5. Pre-compute the cumulative survival function (sum from t' to T)
+        # This is used for the deterministic mapping from iteration to timestep.
+        self.cumulative_survival = torch.flip(torch.cumsum(torch.flip(weights, dims=[0]), dim=0), dims=[0])
+
+    def get_t(self, i):
+        """
+        Gets the deterministic timestep 't' for the current iteration 'i'.
+
+        Args:
+            i (int): The current training iteration.
+
+        Returns:
+            int: The calculated timestep for this iteration.
+        """
+        # Calculate the target cumulative weight based on training progress (i/N)
+        target_cumulative_weight = i / self.total_iterations
+        
+        # Find the timestep t' where the cumulative survival is closest to the target
+        # This implements Eq. 5 from the paper (Source 398)
+        diffs = torch.abs(self.cumulative_survival - target_cumulative_weight)
+        t = torch.argmin(diffs).item()
+        
+        return t
+
 class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -512,10 +567,16 @@ class ConTEXTure:
         front_image_rgba = torch.cat((rgb_output_front, object_mask_front), dim=1)
         cropped_front_image_rgba = front_image_rgba[:, :, min_h:max_h, min_w:max_w]
         cond_image_pil = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
+
+        # JA: to_rgb_image is a helper from Zero123++ which turns the background of cond_image_pil and depth_image_pil
+        # gray
         cond_image_pil = self.to_rgb_image(cond_image_pil)
 
-        # Prepare the 3x2 depth grid for the 6 novel views
-        depth_rgba = torch.cat((depth_maps, depth_maps, depth_maps), dim=1)
+        # JA: Prepare the 3x2 depth grid for the 6 novel views
+        # object_masks is used as the alpha channel for depth_rgba, resulting in a tensor corresponding to an RGBA image
+        # in which the backround regions have an alpha channel of 1. This is then made into a 3x2 grid. It is then
+        # converted to a PIL image which is processed by to_rgb_image, which turns all transparent parts gray.
+        depth_rgba = torch.cat((depth_maps, depth_maps, depth_maps, object_masks), dim=1)
         cropped_depths_small_list = []
         for i in range(1, B):
             min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(object_masks[i, 0])
@@ -528,9 +589,10 @@ class ConTEXTure:
             torch.cat((cropped_depths_small_list[2], cropped_depths_small_list[5]), dim=3),
         ), dim=2)
 
-        self.log_train_image(cropped_depth_grid, 'cropped_depth_grid')
+        self.log_train_image(cropped_depth_grid, 'cropped_depth_grid', file_type="png")
 
         depth_image_pil = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0])
+        depth_image_pil = self.to_rgb_image(depth_image_pil)
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
@@ -540,9 +602,11 @@ class ConTEXTure:
         vae = self.zero123plus.vae
         
         with torch.no_grad():
+            # JA: cond_image_pil is the front view image with a gray background
             cond_image_vae = self.zero123plus.feature_extractor_vae(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=vae.dtype)
             cond_image_clip = self.zero123plus.feature_extractor_clip(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=unet.dtype)
 
+            # JA: cond_lat is from the front view image
             cond_lat = vae.encode(cond_image_vae).latent_dist.sample()
             
             # JA: Get unconditional latent for guidance
@@ -589,12 +653,30 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
+        dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
+
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
-                t = timesteps[t]
+                # t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
+                # t_max_start = 980  # Start with high-noise timesteps (coarse details).
+                # t_max_end = 50     # End with low-noise timesteps (fine details).
+                # annealing_period = 7500 # Number of iterations to perform the annealing over.
+
+                # # Calculate the current progress through the annealing period.
+                # progress = min(i / annealing_period, 1.0)
+                
+                # # Linearly interpolate the max timestep.
+                # current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
+                
+                # # Sample a random timestep from the annealed range.
+                # t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
+
+                t_int = dreamtime_scheduler.get_t(i)
+                t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
+
+                # t = timesteps[t]
 
                 optimizer.zero_grad()
 
@@ -681,7 +763,7 @@ class ConTEXTure:
                     ref_dict = {}
                     unet.unet.unet(
                         noisy_cond_lat, t,
-                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_hidden_states=encoder_hidden_states, # JA: cond_image_clip (from front view image)
                         class_labels=None,
                         cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict),
                         return_dict=False
@@ -745,10 +827,10 @@ class ConTEXTure:
 
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
-                    scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
-                    targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
-                    # scaled_latents_clean.float(),
-                    # targets,
+                    # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
+                    # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                    scaled_latents_clean.float(),
+                    targets,
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
@@ -776,7 +858,8 @@ class ConTEXTure:
                     "fisher_divergence_t": fisher_divergence_t,
                     "ikl_running_avg": ikl_running_avg,
                     "sds_loss": sds_loss,
-                    "consistency_reward": consistency_reward
+                    "consistency_reward": consistency_reward,
+                    "t": t
                 })
 
                 if i % 50 == 0:
@@ -1057,7 +1140,7 @@ class ConTEXTure:
     def print_hook(self, grad):
            print(f"Gradient: {grad}")  
 
-    def log_train_image(self, tensor: torch.Tensor, name: str, colormap=False):
+    def log_train_image(self, tensor: torch.Tensor, name: str, colormap=False, file_type="jpg"):
         if self.cfg.log.log_images:
             if colormap:
                 tensor = cm.seismic(tensor.detach().cpu().numpy())[:, :, :3]
@@ -1072,7 +1155,7 @@ class ConTEXTure:
                 raise ValueError("Tensor contains NaNs or infinite values")
             
             Image.fromarray((tensor * 255).astype(np.uint8)).save(
-                self.train_renders_path / f'debug:{name}.jpg')
+                self.train_renders_path / f'debug:{name}.{file_type}')
 
     def log_diffusion_steps(self, intermediate_vis: List[Image.Image]):
         if len(intermediate_vis) > 0:

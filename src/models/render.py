@@ -61,7 +61,10 @@ class Renderer:
         range_depth = max_depth - min_depth
 
         # Calculate normalized depth maps
-        min_val = 0.5
+        # JA: In TEXTure, the depth maps were normalized such that pixels are 0 if and only if it is part of the
+        # background. However, even the furthest part of the rendered mesh are set to 0.5. This is not expected
+        # behavior in Zero123++ and has been removed.
+        min_val = 0 #0.5 # JA: I changed 0.5 -> 0 for usage with Zero123++
         normalized_depth_maps = torch.where(
             object_mask,
             ((1 - min_val) * (depth_maps - min_depth) / range_depth) + min_val,
