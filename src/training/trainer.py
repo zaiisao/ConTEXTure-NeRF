@@ -248,6 +248,7 @@ class ConTEXTure:
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
+        pipeline.prepare()
         pipeline.to(self.device)
 
         pipeline.inpaint_unet = self.diffusion.inpaint_unet
@@ -470,6 +471,18 @@ class ConTEXTure:
 
         return mean_similarity
 
+    def to_rgb_image(self, maybe_rgba: Image.Image):
+        if maybe_rgba.mode == 'RGB':
+            return maybe_rgba
+        elif maybe_rgba.mode == 'RGBA':
+            rgba = maybe_rgba
+            img = np.random.randint(127, 128, size=[rgba.size[1], rgba.size[0], 3], dtype=np.uint8)
+            img = Image.fromarray(img, 'RGB')
+            img.paste(rgba, mask=rgba.getchannel('A'))
+            return img
+        else:
+            raise ValueError("Unsupported image type.", maybe_rgba.mode)
+
     def paint_zero123plus(self):
         """
         Generates the texture map using Score Distillation Sampling (SDS)
@@ -499,6 +512,7 @@ class ConTEXTure:
         front_image_rgba = torch.cat((rgb_output_front, object_mask_front), dim=1)
         cropped_front_image_rgba = front_image_rgba[:, :, min_h:max_h, min_w:max_w]
         cond_image_pil = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
+        cond_image_pil = self.to_rgb_image(cond_image_pil)
 
         # Prepare the 3x2 depth grid for the 6 novel views
         depth_rgba = torch.cat((depth_maps, depth_maps, depth_maps), dim=1)
@@ -540,14 +554,14 @@ class ConTEXTure:
             # JA: Get text embeddings (for empty prompt) and combine with vision embeddings
             text_embeds = self.zero123plus.encode_prompt("", self.device, 1, False)[0]
             ramp = global_embeds.new_tensor(self.zero123plus.config.ramping_coefficients).unsqueeze(-1)
-            encoder_hidden_states = text_embeds + global_embeds * ramp
+            cond_encoder_hidden_states = text_embeds + global_embeds * ramp
             
             # JA: Get unconditional text embeddings
             uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
             
             # JA: Concatenate for classifier-free guidance
-            final_encoder_hidden_states = torch.cat([uncond_embeds, encoder_hidden_states])
-            final_cond_lat = torch.cat([negative_lat, cond_lat])
+            encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+            clean_cond_lat = torch.cat([negative_lat, cond_lat])
 
             # JA: Prepare depth map tensor for ControlNet
             depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil).to(device=self.device, dtype=unet.dtype)
@@ -563,6 +577,9 @@ class ConTEXTure:
         ) ** 2)
 
         alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+        # sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
+        # sigmas = torch.cat([torch.flip(sigmas, dims=[0]), torch.zeros(1).to(sigmas.device)])
 
         iterations = 15000
         ikl_running_avg = None
@@ -622,6 +639,7 @@ class ConTEXTure:
 
                 with torch.no_grad():
                     noise = torch.randn_like(scaled_latents_clean)
+                    # sigma = sigmas[t.cpu().long()]
 
                     # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
                     latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise #MJ: zt = latents_noisy
@@ -629,18 +647,60 @@ class ConTEXTure:
 
                     latent_model_input = torch.cat([latents_noisy] * 2)
                     latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
-                    
-                    # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
-                    cross_attention_kwargs = {
-                        "cond_lat": final_cond_lat,
-                        "control_depth": depth_tensor #depth_grid.half()
-                    }
 
-                    v_pred = unet(
-                        latent_model_input, t, 
-                        encoder_hidden_states=final_encoder_hidden_states,
-                        cross_attention_kwargs=cross_attention_kwargs,
+                    # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
+                    latent_model_input = latent_model_input.half()
+
+                    # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
+                    down_block_res_samples, mid_block_res_sample = unet.controlnet(
+                        latent_model_input, t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        controlnet_cond=depth_tensor,
+                        conditioning_scale=2,
+                        return_dict=False,
+                    )
+                    
+                    noise_cond = torch.randn_like(clean_cond_lat)
+                    noisy_cond_lat = sqrt_alpha_cumprod_t * clean_cond_lat + sqrt_one_minus_alpha_cumprod_t * noise_cond
+                    noisy_cond_lat = self.zero123plus.scheduler.scale_model_input(noisy_cond_lat, t)
+
+                    # noisy_cond_lat = noisy_cond_lat / ((sigma ** 2 + 1) ** 0.5)
+                    noisy_cond_lat = noisy_cond_lat.half()
+
+                    # JA: The Zero123++ pipeline follows a unique approach of performing two forward passes through the UNet
+                    # in a single denoising step: one to extract features from a reference image, and a second to apply those
+                    # features to the image being generated
+                    #
+                    # unet = DepthControlUNet
+                    # unet.unet = RefOnlyNoisedUNet (custom wrapper in the Zero123++ pipeline for streamlining this approach)
+                    # unet.unet.unet = UNet2DConditionModel
+                    #
+                    # Note: We call the forward function of the UNet2DConditionModel instead of the forward function of
+                    # RefOnlyNoisedNet because the noise adding process is included within it.
+
+                    ref_dict = {}
+                    unet.unet.unet(
+                        noisy_cond_lat, t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        class_labels=None,
+                        cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict),
                         return_dict=False
+                    )
+
+                    weight_dtype = unet.unet.unet.dtype
+
+                    v_pred = unet.unet.unet(
+                        latent_model_input, t, 
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=dict(mode="r", ref_dict=ref_dict, is_cfg_guidance=False),
+                        return_dict=False,
+                        down_block_additional_residuals=[
+                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                        ] if down_block_res_samples is not None else None,
+                        mid_block_additional_residual=(
+                            mid_block_res_sample.to(dtype=weight_dtype)
+                            if mid_block_res_sample is not None else None
+                        ),
                     )[0]
                 
                     # Perform guidance
@@ -663,14 +723,15 @@ class ConTEXTure:
                     sigma_t = sqrt_one_minus_alphas_cumprod.clamp(min=1e-8)
                     alpha_t = sqrt_alphas_cumprod.clamp(min=1e-8)
 
-                    divergence_at_t = torch.sum(((v_pred.detach() - v.detach()) / (alpha_t * sigma_t)) ** 2)
+                    # divergence_at_t = torch.sum(((v_pred.detach() - v.detach()) / (alpha_t * sigma_t)) ** 2)
+                    fisher_divergence_t = torch.sum((alpha_t / sigma_t) ** 2 * torch.abs(v_pred - v) ** 2)
 
                     # Update the running average (Exponential Moving Average)
                     if ikl_running_avg is None:
-                        ikl_running_avg = divergence_at_t.item()
+                        ikl_running_avg = fisher_divergence_t.item()
                     else:
                         beta = 0.99  # Smoothing factor
-                        ikl_running_avg = beta * ikl_running_avg + (1 - beta) * divergence_at_t.item()
+                        ikl_running_avg = beta * ikl_running_avg + (1 - beta) * fisher_divergence_t.item()
 
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
@@ -683,24 +744,26 @@ class ConTEXTure:
                 targets = (scaled_latents_clean - grad).float().detach()
 
                 # 3. Calculate the MSE loss: dloss/dtheta
-                sds_loss = 0.5 * F.mse_loss(
-                    scaled_latents_clean.float(), #MJ: z0 = scaled_latents_clean
-                    targets,                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
+                    scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
+                    targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                    # scaled_latents_clean.float(),
+                    # targets,
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
-                consistency_reward = self.compute_view_consistency(
-                    rendered_six_views_clean,
-                    self.mesh_model.mesh.faces,
-                    render_cache['face_idx'][1:],
-                    render_cache['face_vertices_image'][1:]
-                )
+                consistency_reward = 0#self.compute_view_consistency(
+                #     rendered_six_views_clean,
+                #     self.mesh_model.mesh.faces,
+                #     render_cache['face_idx'][1:],
+                #     render_cache['face_vertices_image'][1:]
+                # )
 
                 loss = sds_loss - 500 * consistency_reward
                 # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
+                # torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
 
                 grad_vector = torch.nn.utils.parameters_to_vector(
                     p.grad for p in self.mesh_model.texture_mlp.parameters() if p.grad is not None
@@ -710,7 +773,7 @@ class ConTEXTure:
 
                 wandb.log({
                     "grad_norm": grad_norm,
-                    "divergence_at_t": divergence_at_t,
+                    "fisher_divergence_t": fisher_divergence_t,
                     "ikl_running_avg": ikl_running_avg,
                     "sds_loss": sds_loss,
                     "consistency_reward": consistency_reward
