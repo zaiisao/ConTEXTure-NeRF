@@ -51,7 +51,7 @@ def unscale_image(image):
     return image
 
 class DreamTimeScheduler:
-    def __init__(self, alphas_cumprod, total_iterations, m=500, s=125):
+    def __init__(self, alphas_cumprod, total_iterations, m=750, s=125):
         """
         Initializes the Time Prioritized SDS scheduler.
 
@@ -68,12 +68,11 @@ class DreamTimeScheduler:
         # Pre-compute the weights W(t) for all timesteps t in [0, T-1]
         
         # 1. Diffusion Prior W_d(t) based on SNR (Eq. 6-7, Source 313, 317)
-        snr = alphas_cumprod / (1 - alphas_cumprod)
-        w_d = torch.sqrt(1 / snr)
+        w_d = torch.sqrt(1 - alphas_cumprod)
 
         # 2. Perception Prior W_p(t), a Gaussian bell curve (Source 417)
         timesteps = torch.arange(self.T, device=self.device)
-        w_p = torch.exp(-0.5 * ((timesteps - m) / s) ** 2)
+        w_p = torch.exp(-((timesteps - m) ** 2) / (2 * (s ** 2)))
 
         # 3. Combined weights W(t) (Source 403)
         weights = w_d * w_p
@@ -735,8 +734,11 @@ class ConTEXTure:
 
                     # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
                     down_block_res_samples, mid_block_res_sample = unet.controlnet(
-                        latent_model_input, t,
-                        encoder_hidden_states=encoder_hidden_states,
+                        latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
+                        encoder_hidden_states=encoder_hidden_states, 
+                        #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+           
                         controlnet_cond=depth_tensor,
                         conditioning_scale=2,
                         return_dict=False,
@@ -762,23 +764,34 @@ class ConTEXTure:
 
                     ref_dict = {}
                     unet.unet.unet(
-                        noisy_cond_lat, t,
-                        encoder_hidden_states=encoder_hidden_states, # JA: cond_image_clip (from front view image)
+                        noisy_cond_lat, t, #MJ:  noisy_cond_lat from  clean_cond_lat = torch.cat([negative_lat, cond_lat]); noisy_cond_lat = sample_t
+                        encoder_hidden_states=encoder_hidden_states, 
+                        # MJ: #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+                        # 
                         class_labels=None,
-                        cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict),
-                        return_dict=False
+                        cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict), 
+                        #MJ: In “write” mode, the processor runs each cross-attn layer and mutates the Python dict you gave (e.g., ref_dict[layer_id] = (K_ref, V_ref)). 
+                        return_dict=False #MJ: the return type of the Unet call (tuple vs. a dataclass)
                     )
 
                     weight_dtype = unet.unet.unet.dtype
 
                     v_pred = unet.unet.unet(
-                        latent_model_input, t, 
-                        encoder_hidden_states=encoder_hidden_states,
+                        latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
+                        encoder_hidden_states=encoder_hidden_states, 
+                        #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+                        #
+                        
                         cross_attention_kwargs=dict(mode="r", ref_dict=ref_dict, is_cfg_guidance=False),
+                        
                         return_dict=False,
+                        
                         down_block_additional_residuals=[
                             sample.to(dtype=weight_dtype) for sample in down_block_res_samples
                         ] if down_block_res_samples is not None else None,
+                        
                         mid_block_additional_residual=(
                             mid_block_res_sample.to(dtype=weight_dtype)
                             if mid_block_res_sample is not None else None
@@ -787,6 +800,10 @@ class ConTEXTure:
                 
                     # Perform guidance
                     v_pred_uncond, v_pred_text = v_pred.chunk(2)
+                    #MJ:  (torch.cat([latents_noisy]*2)) =>  Both v_pred_uncond and v_pred_text will have the values you expect?
+                    # I ask this question, because  you set is_cfg_guidance=False). 
+                    # I would guess that  the “uncond” branch is not truly unconditional; 
+                    # Check what happens when is_cfg_guidance=True (in the first call of unet) and False (in the second call of the unet)
                     guidance_scale = 10
                     v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
 
@@ -796,6 +813,12 @@ class ConTEXTure:
                 
                 v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
                 with torch.no_grad():
+                    #MJ: with torch.no_grad():
+                    # Disables Gradient Tracking: When you enter the with torch.no_grad(): block, 
+                    # PyTorch stops building the computational graph. It doesn't track the history of operations. 
+                    # This means that when you later call loss.backward(), the gradients won't be calculated for any tensors,
+                    # e.g., fisher_divergence_t,  created inside the no_grad block.
+                    
                     # Calculate the Fisher Divergence, which is the squared distance between the scores.
                     # For v-prediction, the score difference is (v_pred - v) / (alpha_t * sigma_t)
                     # alpha_t = sqrt_alphas_cumprod
