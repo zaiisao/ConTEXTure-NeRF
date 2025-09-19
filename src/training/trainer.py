@@ -630,16 +630,19 @@ class ConTEXTure:
             depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil).to(device=self.device, dtype=unet.dtype)
 
         num_timesteps = 1000
-        timesteps = torch.arange(0, num_timesteps, dtype=torch.float64, device=self.device).flip(0)
+        scheduler.set_timesteps(num_timesteps, device=self.device)
+        timesteps = scheduler.timesteps
+        # timesteps = torch.arange(0, num_timesteps, dtype=torch.float64, device=self.device).flip(0)
 
         # JA: Where α = 1 - β, β represents standard deviations and ranges from sqrt(1e-4) to sqrt(2e-2). This is the same
         # setting used by Stable Diffusion. β consists of num_timesteps number of equidistant standard deviations between
         # the aforementioned two numbers.
-        alphas = 1. - (torch.linspace(
-            1e-4 ** 0.5, 2e-2 ** 0.5, num_timesteps, device=self.device, dtype=torch.float64
-        ) ** 2)
+        # alphas = 1. - (torch.linspace(
+        #     1e-4 ** 0.5, 2e-2 ** 0.5, num_timesteps, device=self.device, dtype=torch.float64
+        # ) ** 2)
 
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        # alphas_cumprod = torch.cumprod(alphas, dim=0)
+        alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
 
         # sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
         # sigmas = torch.cat([torch.flip(sigmas, dims=[0]), torch.zeros(1).to(sigmas.device)])
@@ -652,30 +655,30 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
-        dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
+        # dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
 
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
+                t_max_start = 980  # Start with high-noise timesteps (coarse details).
+                t_max_end = 50     # End with low-noise timesteps (fine details).
+                annealing_period = 7500 # Number of iterations to perform the annealing over.
+
+                # Calculate the current progress through the annealing period.
+                progress = min(i / annealing_period, 1.0)
+                
+                # Linearly interpolate the max timestep.
+                current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
+                
+                # Sample a random timestep from the annealed range.
+                t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
+
+                # t_int = dreamtime_scheduler.get_t(i)
+                # t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
+
                 # t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
-                # t_max_start = 980  # Start with high-noise timesteps (coarse details).
-                # t_max_end = 50     # End with low-noise timesteps (fine details).
-                # annealing_period = 7500 # Number of iterations to perform the annealing over.
-
-                # # Calculate the current progress through the annealing period.
-                # progress = min(i / annealing_period, 1.0)
-                
-                # # Linearly interpolate the max timestep.
-                # current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
-                
-                # # Sample a random timestep from the annealed range.
-                # t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
-
-                t_int = dreamtime_scheduler.get_t(i)
-                t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
-
-                # t = timesteps[t]
+                t = timesteps[t]
 
                 optimizer.zero_grad()
 
@@ -714,90 +717,97 @@ class ConTEXTure:
 
                 scaled_latents_clean = scale_latents(latents_clean)
 
-                alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
-                sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
-                sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
+                # alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
+                # sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
+                # sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
 
                 with torch.no_grad():
                     noise = torch.randn_like(scaled_latents_clean)
                     # sigma = sigmas[t.cpu().long()]
 
                     # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
-                    latents_noisy = sqrt_alpha_cumprod_t * scaled_latents_clean + sqrt_one_minus_alpha_cumprod_t * noise #MJ: zt = latents_noisy
+                    latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t)
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
                     latent_model_input = torch.cat([latents_noisy] * 2)
-                    latent_model_input = self.zero123plus.scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
                     # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
                     latent_model_input = latent_model_input.half()
 
                     # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
-                    down_block_res_samples, mid_block_res_sample = unet.controlnet(
-                        latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
-                        encoder_hidden_states=encoder_hidden_states, 
-                        #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+                    # down_block_res_samples, mid_block_res_sample = unet.controlnet(
+                    #     latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
+                    #     encoder_hidden_states=encoder_hidden_states, 
+                    #     #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
            
-                        controlnet_cond=depth_tensor,
-                        conditioning_scale=2,
-                        return_dict=False,
-                    )
+                    #     controlnet_cond=depth_tensor,
+                    #     conditioning_scale=2,
+                    #     return_dict=False,
+                    # )
                     
-                    noise_cond = torch.randn_like(clean_cond_lat)
-                    noisy_cond_lat = sqrt_alpha_cumprod_t * clean_cond_lat + sqrt_one_minus_alpha_cumprod_t * noise_cond
-                    noisy_cond_lat = self.zero123plus.scheduler.scale_model_input(noisy_cond_lat, t)
+                    # noise_cond = torch.randn_like(clean_cond_lat)
+                    # noisy_cond_lat = sqrt_alpha_cumprod_t * clean_cond_lat + sqrt_one_minus_alpha_cumprod_t * noise_cond
+                    # noisy_cond_lat = self.zero123plus.scheduler.scale_model_input(noisy_cond_lat, t)
 
-                    # noisy_cond_lat = noisy_cond_lat / ((sigma ** 2 + 1) ** 0.5)
-                    noisy_cond_lat = noisy_cond_lat.half()
+                    # # noisy_cond_lat = noisy_cond_lat / ((sigma ** 2 + 1) ** 0.5)
+                    # noisy_cond_lat = noisy_cond_lat.half()
 
-                    # JA: The Zero123++ pipeline follows a unique approach of performing two forward passes through the UNet
-                    # in a single denoising step: one to extract features from a reference image, and a second to apply those
-                    # features to the image being generated
-                    #
-                    # unet = DepthControlUNet
-                    # unet.unet = RefOnlyNoisedUNet (custom wrapper in the Zero123++ pipeline for streamlining this approach)
-                    # unet.unet.unet = UNet2DConditionModel
-                    #
-                    # Note: We call the forward function of the UNet2DConditionModel instead of the forward function of
-                    # RefOnlyNoisedNet because the noise adding process is included within it.
+                    # # JA: The Zero123++ pipeline follows a unique approach of performing two forward passes through the UNet
+                    # # in a single denoising step: one to extract features from a reference image, and a second to apply those
+                    # # features to the image being generated
+                    # #
+                    # # unet = DepthControlUNet
+                    # # unet.unet = RefOnlyNoisedUNet (custom wrapper in the Zero123++ pipeline for streamlining this approach)
+                    # # unet.unet.unet = UNet2DConditionModel
+                    # #
+                    # # Note: We call the forward function of the UNet2DConditionModel instead of the forward function of
+                    # # RefOnlyNoisedNet because the noise adding process is included within it.
 
-                    ref_dict = {}
-                    unet.unet.unet(
-                        noisy_cond_lat, t, #MJ:  noisy_cond_lat from  clean_cond_lat = torch.cat([negative_lat, cond_lat]); noisy_cond_lat = sample_t
-                        encoder_hidden_states=encoder_hidden_states, 
-                        # MJ: #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
-                        # 
-                        class_labels=None,
-                        cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict), 
-                        #MJ: In “write” mode, the processor runs each cross-attn layer and mutates the Python dict you gave (e.g., ref_dict[layer_id] = (K_ref, V_ref)). 
-                        return_dict=False #MJ: the return type of the Unet call (tuple vs. a dataclass)
-                    )
+                    # ref_dict = {}
+                    # unet.unet.unet(
+                    #     noisy_cond_lat, t, #MJ:  noisy_cond_lat from  clean_cond_lat = torch.cat([negative_lat, cond_lat]); noisy_cond_lat = sample_t
+                    #     encoder_hidden_states=encoder_hidden_states, 
+                    #     # MJ: #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+                    #     # 
+                    #     class_labels=None,
+                    #     cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict), 
+                    #     #MJ: In “write” mode, the processor runs each cross-attn layer and mutates the Python dict you gave (e.g., ref_dict[layer_id] = (K_ref, V_ref)). 
+                    #     return_dict=False #MJ: the return type of the Unet call (tuple vs. a dataclass)
+                    # )
 
-                    weight_dtype = unet.unet.unet.dtype
+                    # weight_dtype = unet.unet.unet.dtype
 
-                    v_pred = unet.unet.unet(
-                        latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
-                        encoder_hidden_states=encoder_hidden_states, 
-                        #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                        #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
-                        #
+                    # v_pred = unet.unet.unet(
+                    #     latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
+                    #     encoder_hidden_states=encoder_hidden_states, 
+                    #     #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
+                    #     #
                         
-                        cross_attention_kwargs=dict(mode="r", ref_dict=ref_dict, is_cfg_guidance=False),
+                    #     cross_attention_kwargs=dict(mode="r", ref_dict=ref_dict, is_cfg_guidance=False),
                         
+                    #     return_dict=False,
+                        
+                    #     down_block_additional_residuals=[
+                    #         sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                    #     ] if down_block_res_samples is not None else None,
+                        
+                    #     mid_block_additional_residual=(
+                    #         mid_block_res_sample.to(dtype=weight_dtype)
+                    #         if mid_block_res_sample is not None else None
+                    #     ),
+                    # )[0]
+
+                    v_pred = unet(
+                        latent_model_input, t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
                         return_dict=False,
-                        
-                        down_block_additional_residuals=[
-                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                        ] if down_block_res_samples is not None else None,
-                        
-                        mid_block_additional_residual=(
-                            mid_block_res_sample.to(dtype=weight_dtype)
-                            if mid_block_res_sample is not None else None
-                        ),
                     )[0]
-                
+
                     # Perform guidance
                     v_pred_uncond, v_pred_text = v_pred.chunk(2)
                     #MJ:  (torch.cat([latents_noisy]*2)) =>  Both v_pred_uncond and v_pred_text will have the values you expect?
@@ -812,6 +822,7 @@ class ConTEXTure:
                 sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 
                 v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
+
                 with torch.no_grad():
                     #MJ: with torch.no_grad():
                     # Disables Gradient Tracking: When you enter the with torch.no_grad(): block, 
