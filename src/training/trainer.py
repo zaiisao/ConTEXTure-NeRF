@@ -16,6 +16,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import types
+import random
 
 from torch_scatter import scatter_max
 
@@ -28,7 +29,7 @@ from src.configs.train_config import TrainConfig
 from src.models.textured_mesh import TexturedMeshModel
 from src.stable_diffusion_depth import StableDiffusion
 from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, MultiviewDataset
-from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid
+from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid, split_3x2_grid_to_tensor_with_6_elements
 from src.run_nerf_helpers import *
 
 from PIL import Image, ImageDraw
@@ -602,8 +603,15 @@ class ConTEXTure:
         
         with torch.no_grad():
             # JA: cond_image_pil is the front view image with a gray background
-            cond_image_vae = self.zero123plus.feature_extractor_vae(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=vae.dtype)
-            cond_image_clip = self.zero123plus.feature_extractor_clip(images=cond_image_pil, return_tensors="pt").pixel_values.to(device=self.device, dtype=unet.dtype)
+            cond_image_vae = self.zero123plus.feature_extractor_vae(
+                images=cond_image_pil,
+                return_tensors="pt"
+            ).pixel_values.to(device=self.device, dtype=vae.dtype)
+
+            cond_image_clip = self.zero123plus.feature_extractor_clip(
+                images=cond_image_pil,
+                return_tensors="pt"
+            ).pixel_values.to(device=self.device, dtype=unet.dtype)
 
             # JA: cond_lat is from the front view image
             cond_lat = vae.encode(cond_image_vae).latent_dist.sample()
@@ -647,7 +655,7 @@ class ConTEXTure:
         # sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
         # sigmas = torch.cat([torch.flip(sigmas, dims=[0]), torch.zeros(1).to(sigmas.device)])
 
-        iterations = 15000
+        iterations = 5000
         ikl_running_avg = None
 
         import wandb
@@ -655,30 +663,35 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
-        # dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
-
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                t_max_start = 980  # Start with high-noise timesteps (coarse details).
-                t_max_end = 50     # End with low-noise timesteps (fine details).
-                annealing_period = 7500 # Number of iterations to perform the annealing over.
+                timestep_scheme = "dreamtime"
+                assert timestep_scheme in ["basic_annealing", "random", "dreamtime"]
 
-                # Calculate the current progress through the annealing period.
-                progress = min(i / annealing_period, 1.0)
-                
-                # Linearly interpolate the max timestep.
-                current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
-                
-                # Sample a random timestep from the annealed range.
-                t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
+                if timestep_scheme == "basic_annealing":
+                    t_max_start = 980  # Start with high-noise timesteps (coarse details).
+                    t_max_end = 50     # End with low-noise timesteps (fine details).
+                    annealing_period = 7500 # Number of iterations to perform the annealing over.
 
-                # t_int = dreamtime_scheduler.get_t(i)
-                # t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
+                    # Calculate the current progress through the annealing period.
+                    progress = min(i / annealing_period, 1.0)
+                    
+                    # Linearly interpolate the max timestep.
+                    current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
+                    
+                    # Sample a random timestep from the annealed range.
+                    t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
+                    t = timesteps[t]
+                elif timestep_scheme == "random":
+                    t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
+                    t = timesteps[t]
+                elif timestep_scheme == "dreamtime":
+                    dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
 
-                # t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
-                t = timesteps[t]
+                    t_int = dreamtime_scheduler.get_t(i)
+                    t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
 
                 optimizer.zero_grad()
 
@@ -735,72 +748,6 @@ class ConTEXTure:
                     # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
                     latent_model_input = latent_model_input.half()
 
-                    # JA: Prepare cross-attention kwargs, which is how Zero123++ pipeline passes conditioning
-                    # down_block_res_samples, mid_block_res_sample = unet.controlnet(
-                    #     latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
-                    #     encoder_hidden_states=encoder_hidden_states, 
-                    #     #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
-           
-                    #     controlnet_cond=depth_tensor,
-                    #     conditioning_scale=2,
-                    #     return_dict=False,
-                    # )
-                    
-                    # noise_cond = torch.randn_like(clean_cond_lat)
-                    # noisy_cond_lat = sqrt_alpha_cumprod_t * clean_cond_lat + sqrt_one_minus_alpha_cumprod_t * noise_cond
-                    # noisy_cond_lat = self.zero123plus.scheduler.scale_model_input(noisy_cond_lat, t)
-
-                    # # noisy_cond_lat = noisy_cond_lat / ((sigma ** 2 + 1) ** 0.5)
-                    # noisy_cond_lat = noisy_cond_lat.half()
-
-                    # # JA: The Zero123++ pipeline follows a unique approach of performing two forward passes through the UNet
-                    # # in a single denoising step: one to extract features from a reference image, and a second to apply those
-                    # # features to the image being generated
-                    # #
-                    # # unet = DepthControlUNet
-                    # # unet.unet = RefOnlyNoisedUNet (custom wrapper in the Zero123++ pipeline for streamlining this approach)
-                    # # unet.unet.unet = UNet2DConditionModel
-                    # #
-                    # # Note: We call the forward function of the UNet2DConditionModel instead of the forward function of
-                    # # RefOnlyNoisedNet because the noise adding process is included within it.
-
-                    # ref_dict = {}
-                    # unet.unet.unet(
-                    #     noisy_cond_lat, t, #MJ:  noisy_cond_lat from  clean_cond_lat = torch.cat([negative_lat, cond_lat]); noisy_cond_lat = sample_t
-                    #     encoder_hidden_states=encoder_hidden_states, 
-                    #     # MJ: #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
-                    #     # 
-                    #     class_labels=None,
-                    #     cross_attention_kwargs=dict(mode="w", ref_dict=ref_dict), 
-                    #     #MJ: In “write” mode, the processor runs each cross-attn layer and mutates the Python dict you gave (e.g., ref_dict[layer_id] = (K_ref, V_ref)). 
-                    #     return_dict=False #MJ: the return type of the Unet call (tuple vs. a dataclass)
-                    # )
-
-                    # weight_dtype = unet.unet.unet.dtype
-
-                    # v_pred = unet.unet.unet(
-                    #     latent_model_input, t, #MJ: latent_model_input = torch.cat([latents_noisy] * 2)
-                    #     encoder_hidden_states=encoder_hidden_states, 
-                    #     #MJ: encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
-                    #     #  uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
-                    #     #
-                        
-                    #     cross_attention_kwargs=dict(mode="r", ref_dict=ref_dict, is_cfg_guidance=False),
-                        
-                    #     return_dict=False,
-                        
-                    #     down_block_additional_residuals=[
-                    #         sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                    #     ] if down_block_res_samples is not None else None,
-                        
-                    #     mid_block_additional_residual=(
-                    #         mid_block_res_sample.to(dtype=weight_dtype)
-                    #         if mid_block_res_sample is not None else None
-                    #     ),
-                    # )[0]
-
                     v_pred = unet(
                         latent_model_input, t,
                         encoder_hidden_states=encoder_hidden_states,
@@ -849,7 +796,7 @@ class ConTEXTure:
                         beta = 0.99  # Smoothing factor
                         ikl_running_avg = beta * ikl_running_avg + (1 - beta) * fisher_divergence_t.item()
 
-                grad_scale = 1
+                grad_scale = 0.2
                 w = (1 - alphas_cumprod[t.cpu().long()])
                 grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
                 # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
@@ -859,12 +806,19 @@ class ConTEXTure:
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
+                scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean.float(), tile_size=40)
+                targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
+
+                index_to_train = random.randint(0, 5)
+
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
                     # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
                     # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
-                    scaled_latents_clean.float(),
-                    targets,
+                    # scaled_latents_clean.float(),
+                    # targets,
+                    scaled_latents_split[index_to_train],
+                    targets_split[index_to_train],
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
