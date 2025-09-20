@@ -22,7 +22,7 @@ from torch_scatter import scatter_max
 
 import torchvision
 from PIL import Image
-from diffusers import DiffusionPipeline, ControlNetModel
+from diffusers import DiffusionPipeline, ControlNetModel, DDPMScheduler
 
 from src import utils
 from src.configs.train_config import TrainConfig
@@ -303,6 +303,10 @@ class ConTEXTure:
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
+        pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
+
+        pipeline._callback_tensor_inputs += ["noise_pred"]
+
         pipeline.prepare()
         pipeline.to(self.device)
 
@@ -566,11 +570,11 @@ class ConTEXTure:
         min_h, min_w, max_h, max_w = utils.get_nonzero_region_tuple(object_mask_front[0, 0])
         front_image_rgba = torch.cat((rgb_output_front, object_mask_front), dim=1)
         cropped_front_image_rgba = front_image_rgba[:, :, min_h:max_h, min_w:max_w]
-        cond_image_pil = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
+        cond_image_pil_rgba = torchvision.transforms.functional.to_pil_image(cropped_front_image_rgba[0]).resize((320, 320))
 
         # JA: to_rgb_image is a helper from Zero123++ which turns the background of cond_image_pil and depth_image_pil
         # gray
-        cond_image_pil = self.to_rgb_image(cond_image_pil)
+        cond_image_pil_rgb = self.to_rgb_image(cond_image_pil_rgba)
 
         # JA: Prepare the 3x2 depth grid for the 6 novel views
         # object_masks is used as the alpha channel for depth_rgba, resulting in a tensor corresponding to an RGBA image
@@ -591,8 +595,8 @@ class ConTEXTure:
 
         self.log_train_image(cropped_depth_grid, 'cropped_depth_grid', file_type="png")
 
-        depth_image_pil = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0])
-        depth_image_pil = self.to_rgb_image(depth_image_pil)
+        depth_image_pil_rgba = torchvision.transforms.functional.to_pil_image(cropped_depth_grid[0])
+        depth_image_pil_rgb = self.to_rgb_image(depth_image_pil_rgba)
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
@@ -604,12 +608,12 @@ class ConTEXTure:
         with torch.no_grad():
             # JA: cond_image_pil is the front view image with a gray background
             cond_image_vae = self.zero123plus.feature_extractor_vae(
-                images=cond_image_pil,
+                images=cond_image_pil_rgb,
                 return_tensors="pt"
             ).pixel_values.to(device=self.device, dtype=vae.dtype)
 
             cond_image_clip = self.zero123plus.feature_extractor_clip(
-                images=cond_image_pil,
+                images=cond_image_pil_rgb,
                 return_tensors="pt"
             ).pixel_values.to(device=self.device, dtype=unet.dtype)
 
@@ -635,7 +639,7 @@ class ConTEXTure:
             clean_cond_lat = torch.cat([negative_lat, cond_lat])
 
             # JA: Prepare depth map tensor for ControlNet
-            depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil).to(device=self.device, dtype=unet.dtype)
+            depth_tensor = self.zero123plus.depth_transforms_multi(depth_image_pil_rgb).to(device=self.device, dtype=unet.dtype)
 
         num_timesteps = 1000
         scheduler.set_timesteps(num_timesteps, device=self.device)
@@ -742,27 +746,54 @@ class ConTEXTure:
                     latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t)
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
-                    latent_model_input = torch.cat([latents_noisy] * 2)
-                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                    # latent_model_input = torch.cat([latents_noisy] * 2)
+                    # latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
-                    # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
-                    latent_model_input = latent_model_input.half()
+                    # # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
+                    # latent_model_input = latent_model_input.half()
 
-                    v_pred = unet(
-                        latent_model_input, t,
-                        encoder_hidden_states=encoder_hidden_states,
-                        cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
-                        return_dict=False,
-                    )[0]
+                    # v_pred = unet(
+                    #     latent_model_input, t,
+                    #     encoder_hidden_states=encoder_hidden_states,
+                    #     cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
+                    #     return_dict=False,
+                    # )[0]
 
                     # Perform guidance
-                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
+                    # v_pred_uncond, v_pred_text = v_pred.chunk(2)
                     #MJ:  (torch.cat([latents_noisy]*2)) =>  Both v_pred_uncond and v_pred_text will have the values you expect?
                     # I ask this question, because  you set is_cfg_guidance=False). 
                     # I would guess that  the “uncond” branch is not truly unconditional; 
                     # Check what happens when is_cfg_guidance=True (in the first call of unet) and False (in the second call of the unet)
                     guidance_scale = 10
-                    v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+
+                    v_pred = None
+
+                    def callback_on_step_end(pipeline, i, t, callback_kwargs):
+                        v_pred_zero123plus = callback_kwargs["noise_pred"]
+                        # is_close = torch.isclose(v_pred_zero123plus, v_pred, rtol=1e-3, atol=1e-5)
+                        # # print(is_close)
+                        # print(f"{is_close.sum().item()} / {torch.numel(v_pred_zero123plus)} values are close")
+                        # print(v_pred_zero123plus[0, 0, 0, :10])
+                        # print(v_pred[0, 0, 0, :10])
+
+                        # Test by JA
+                        nonlocal v_pred
+                        v_pred = v_pred_zero123plus
+
+                        return callback_kwargs
+
+                    pipeline_result = self.zero123plus(
+                        cond_image_pil_rgba,
+                        depth_image=depth_image_pil_rgba,
+                        num_inference_steps=1,
+                        timesteps=[t.item()],
+                        guidance_scale=guidance_scale,
+                        latents=latents_noisy, # (= z_t)
+                        callback_on_step_end=callback_on_step_end,
+                        callback_on_step_end_tensor_inputs=["latents", "noise_pred"]
+                    ).images[0]
 
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
