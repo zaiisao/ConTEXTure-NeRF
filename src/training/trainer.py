@@ -299,11 +299,15 @@ class ConTEXTure:
             torch_dtype=torch.float16
         )
 
+        # pipeline.scheduler = StatelessEulerAncestralDiscreteScheduler.from_config(
+        #     pipeline.scheduler.config
+        # )
+        pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
+
         pipeline.add_controlnet(ControlNetModel.from_pretrained(
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
-        pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 
         pipeline._callback_tensor_inputs += ["noise_pred"]
 
@@ -743,57 +747,58 @@ class ConTEXTure:
                     # sigma = sigmas[t.cpu().long()]
 
                     # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
-                    latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t)
+                    latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(-1))
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
-                    # latent_model_input = torch.cat([latents_noisy] * 2)
-                    # latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = torch.cat([latents_noisy] * 2)
+                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
-                    # # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
-                    # latent_model_input = latent_model_input.half()
+                    # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
+                    latent_model_input = latent_model_input.half()
 
-                    # v_pred = unet(
-                    #     latent_model_input, t,
-                    #     encoder_hidden_states=encoder_hidden_states,
-                    #     cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
-                    #     return_dict=False,
-                    # )[0]
+                    v_pred = unet(
+                        latent_model_input, t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
+                        return_dict=False,
+                    )[0]
 
                     # Perform guidance
-                    # v_pred_uncond, v_pred_text = v_pred.chunk(2)
+                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
                     #MJ:  (torch.cat([latents_noisy]*2)) =>  Both v_pred_uncond and v_pred_text will have the values you expect?
                     # I ask this question, because  you set is_cfg_guidance=False). 
                     # I would guess that  the “uncond” branch is not truly unconditional; 
                     # Check what happens when is_cfg_guidance=True (in the first call of unet) and False (in the second call of the unet)
-                    guidance_scale = 10
-                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                    guidance_scale = 4
+                    v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
 
-                    v_pred = None
+                    # v_pred = None
 
-                    def callback_on_step_end(pipeline, i, t, callback_kwargs):
-                        v_pred_zero123plus = callback_kwargs["noise_pred"]
-                        # is_close = torch.isclose(v_pred_zero123plus, v_pred, rtol=1e-3, atol=1e-5)
-                        # # print(is_close)
-                        # print(f"{is_close.sum().item()} / {torch.numel(v_pred_zero123plus)} values are close")
-                        # print(v_pred_zero123plus[0, 0, 0, :10])
-                        # print(v_pred[0, 0, 0, :10])
+                    # def callback_on_step_end(pipeline, i, t, callback_kwargs):
+                    #     v_pred_zero123plus = callback_kwargs["noise_pred"]
+                    #     # is_close = torch.isclose(v_pred_zero123plus, v_pred, rtol=1e-3, atol=1e-5)
+                    #     # # print(is_close)
+                    #     # print(f"{is_close.sum().item()} / {torch.numel(v_pred_zero123plus)} values are close")
+                    #     # print(v_pred_zero123plus[0, 0, 0, :10])
+                    #     # print(v_pred[0, 0, 0, :10])
 
-                        # Test by JA
-                        nonlocal v_pred
-                        v_pred = v_pred_zero123plus
+                    #     # Test by JA
+                    #     nonlocal v_pred
+                    #     v_pred = v_pred_zero123plus
 
-                        return callback_kwargs
+                    #     return callback_kwargs
 
-                    pipeline_result = self.zero123plus(
-                        cond_image_pil_rgba,
-                        depth_image=depth_image_pil_rgba,
-                        num_inference_steps=1,
-                        timesteps=[t.item()],
-                        guidance_scale=guidance_scale,
-                        latents=latents_noisy, # (= z_t)
-                        callback_on_step_end=callback_on_step_end,
-                        callback_on_step_end_tensor_inputs=["latents", "noise_pred"]
-                    ).images[0]
+                    # pipeline_result = self.zero123plus(
+                    #     cond_image_pil_rgba,
+                    #     depth_image=depth_image_pil_rgba,
+                    #     # num_inference_steps=1,
+                    #     num_inference_steps=36,
+                    #     # timesteps=t,
+                    #     guidance_scale=guidance_scale,
+                    #     # latents=latents_noisy, # (= z_t)
+                    #     callback_on_step_end=callback_on_step_end,
+                    #     callback_on_step_end_tensor_inputs=["latents", "noise_pred"]
+                    # ).images[0]
 
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
@@ -840,7 +845,7 @@ class ConTEXTure:
                 scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean.float(), tile_size=40)
                 targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
 
-                index_to_train = random.randint(0, 5)
+                # index_to_train = random.randint(0, 5)
 
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
@@ -848,8 +853,8 @@ class ConTEXTure:
                     # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     # scaled_latents_clean.float(),
                     # targets,
-                    scaled_latents_split[index_to_train],
-                    targets_split[index_to_train],
+                    scaled_latents_split,
+                    targets_split,
                     reduction='sum'
                 ) / scaled_latents_clean.shape[0]
 
