@@ -22,7 +22,7 @@ from torch_scatter import scatter_max
 
 import torchvision
 from PIL import Image
-from diffusers import DiffusionPipeline, ControlNetModel, DDPMScheduler
+from diffusers import DiffusionPipeline, ControlNetModel, DDPMScheduler, EulerAncestralDiscreteScheduler
 
 from src import utils
 from src.configs.train_config import TrainConfig
@@ -33,6 +33,9 @@ from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123
 from src.run_nerf_helpers import *
 
 from PIL import Image, ImageDraw
+from scipy.interpolate import interp1d
+from src.scheduling_euler_ancestral_discrete import StatelessEulerAncestralDiscreteScheduler
+
 # JA: scale_latents, unscale_latents, scale_image, and unscale_image are from the Zero123++ pipeline code:
 # https://huggingface.co/sudo-ai/zero123plus-pipeline/blob/main/pipeline.py
 def scale_latents(latents):
@@ -50,6 +53,7 @@ def scale_image(image):
 def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
+
 
 class DreamTimeScheduler:
     def __init__(self, alphas_cumprod, total_iterations, m=750, s=125):
