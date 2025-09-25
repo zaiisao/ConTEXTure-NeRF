@@ -105,6 +105,50 @@ class DreamTimeScheduler:
         
         return t
 
+class MomentumBuffer:
+    def __init__(self, momentum: float):
+        self.momentum = momentum
+        self.running_average = 0
+
+    def update(self, update_value: torch.Tensor):
+        new_average = self.momentum * self.running_average
+        self.running_average = update_value + new_average
+
+def project(
+    v0: torch.Tensor, # [B, C, H, W]
+    v1: torch.Tensor, # [B, C, H, W]
+):
+    dtype = v0.dtype
+    v0, v1 = v0.double(), v1.double()
+    v1 = torch.nn.functional.normalize(v1, dim=[-1, -2, -3])
+    v0_parallel = (v0 * v1).sum(dim=[-1, -2, -3], keepdim=True) * v1
+    v0_orthogonal = v0 - v0_parallel
+    return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
+
+def adaptive_projected_guidance(
+    pred_cond: torch.Tensor, # [B, C, H, W]
+    pred_uncond: torch.Tensor, # [B, C, H, W]
+    guidance_scale: float,
+    momentum_buffer: MomentumBuffer = None,
+    eta: float = 1.0,
+    norm_threshold: float = 0.0,
+):
+    diff = pred_cond - pred_uncond
+    if momentum_buffer is not None:
+        momentum_buffer.update(diff)
+        diff = momentum_buffer.running_average
+
+    if norm_threshold > 0:
+        ones = torch.ones_like(diff)
+        diff_norm = diff.norm(p=2, dim=[-1, -2, -3], keepdim=True)
+        scale_factor = torch.minimum(ones, norm_threshold / diff_norm)
+        diff = diff * scale_factor
+
+    diff_parallel, diff_orthogonal = project(diff, pred_cond)
+    normalized_update = diff_orthogonal + eta * diff_parallel
+    pred_guided = pred_cond + (guidance_scale - 1) * normalized_update
+    return pred_guided
+
 class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -126,7 +170,7 @@ class ConTEXTure:
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
         
-        self.uv_embedder, input_ch_uv = get_embedder(multires=10) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+        self.uv_embedder, input_ch_uv = get_embedder(multires=12) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         
@@ -543,6 +587,26 @@ class ConTEXTure:
         else:
             raise ValueError("Unsupported image type.", maybe_rgba.mode)
 
+    def total_variation_loss(self, texture_map):
+        """
+        Computes the Total Variation loss for a texture map based on the formula:
+        TV(z) = sum(|z_{u+1,v} - z_{u,v}| + |z_{u,v+1} - z_{u,v}|)
+
+        Args:
+            texture_map (torch.Tensor): The texture map tensor of shape (B, C, H, W).
+
+        Returns:
+            torch.Tensor: The scalar Total Variation loss.
+        """
+        # Horizontal variation (differences between adjacent columns)
+        dw = torch.abs(texture_map[:, :, :, 1:] - texture_map[:, :, :, :-1])
+        
+        # Vertical variation (differences between adjacent rows)
+        dh = torch.abs(texture_map[:, :, 1:, :] - texture_map[:, :, :-1, :])
+        
+        # Sum of absolute differences
+        return (torch.sum(dw) + torch.sum(dh)) / texture_map.numel()
+
     def paint_zero123plus(self):
         """
         Generates the texture map using Score Distillation Sampling (SDS)
@@ -601,7 +665,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -645,20 +709,8 @@ class ConTEXTure:
         num_timesteps = 1000
         scheduler.set_timesteps(num_timesteps, device=self.device)
         timesteps = scheduler.timesteps
-        # timesteps = torch.arange(0, num_timesteps, dtype=torch.float64, device=self.device).flip(0)
 
-        # JA: Where α = 1 - β, β represents standard deviations and ranges from sqrt(1e-4) to sqrt(2e-2). This is the same
-        # setting used by Stable Diffusion. β consists of num_timesteps number of equidistant standard deviations between
-        # the aforementioned two numbers.
-        # alphas = 1. - (torch.linspace(
-        #     1e-4 ** 0.5, 2e-2 ** 0.5, num_timesteps, device=self.device, dtype=torch.float64
-        # ) ** 2)
-
-        # alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
-
-        # sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
-        # sigmas = torch.cat([torch.flip(sigmas, dims=[0]), torch.zeros(1).to(sigmas.device)])
 
         iterations = 5000
         ikl_running_avg = None
@@ -668,11 +720,13 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
+        momentum_buffer = MomentumBuffer(momentum=-0.75)
+
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                timestep_scheme = "basic_annealing"
+                timestep_scheme = "random"
                 assert timestep_scheme in ["basic_annealing", "random", "dreamtime"]
 
                 if timestep_scheme == "basic_annealing":
@@ -688,10 +742,10 @@ class ConTEXTure:
                     
                     # Sample a random timestep from the annealed range.
                     t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
-                    t = timesteps[t]
+                    # t = timesteps[t]
                 elif timestep_scheme == "random":
-                    t = torch.randint(0, num_timesteps, (1,), device=self.device).long()
-                    t = timesteps[t]
+                    t = torch.randint(int(num_timesteps * 0.3), int(num_timesteps * 0.6), (1,), device=self.device).long()
+                    # t = timesteps[t]
                 elif timestep_scheme == "dreamtime":
                     dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
 
@@ -747,54 +801,36 @@ class ConTEXTure:
                     latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t)
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
-                    # latent_model_input = torch.cat([latents_noisy] * 2)
-                    # latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = torch.cat([latents_noisy] * 2)
+                latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                latent_model_input = latent_model_input.half()
 
-                    # # latent_model_input = latent_model_input / ((sigma ** 2 + 1) ** 0.5)
-                    # latent_model_input = latent_model_input.half()
+                v_pred = unet(
+                    latent_model_input, t,
+                    encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
+                    return_dict=False,
+                )[0]
 
-                    # v_pred = unet(
-                    #     latent_model_input, t,
-                    #     encoder_hidden_states=encoder_hidden_states,
-                    #     cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
-                    #     return_dict=False,
-                    # )[0]
+                # Perform guidance
+                v_pred_uncond, v_pred_text = v_pred.chunk(2)
 
-                    # Perform guidance
-                    # v_pred_uncond, v_pred_text = v_pred.chunk(2)
-                    #MJ:  (torch.cat([latents_noisy]*2)) =>  Both v_pred_uncond and v_pred_text will have the values you expect?
-                    # I ask this question, because  you set is_cfg_guidance=False). 
-                    # I would guess that  the “uncond” branch is not truly unconditional; 
-                    # Check what happens when is_cfg_guidance=True (in the first call of unet) and False (in the second call of the unet)
-                    guidance_scale = 4
-                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                # guidance_scale = 4
+                # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
+                sigma_t = (1 - alpha_t).sqrt()
+                z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
+                z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
 
-                    v_pred = None
+                v_pred = adaptive_projected_guidance(
+                    pred_cond=z0_pred_cond,
+                    pred_uncond=z0_pred_uncond,
+                    guidance_scale=100.0,
+                    momentum_buffer=None,#momentum_buffer,
+                    eta=0.0,
+                    norm_threshold=0.0
+                )
 
-                    def callback_on_step_end(pipeline, i, t, callback_kwargs):
-                        v_pred_zero123plus = callback_kwargs["noise_pred"]
-                        # is_close = torch.isclose(v_pred_zero123plus, v_pred, rtol=1e-3, atol=1e-5)
-                        # # print(is_close)
-                        # print(f"{is_close.sum().item()} / {torch.numel(v_pred_zero123plus)} values are close")
-                        # print(v_pred_zero123plus[0, 0, 0, :10])
-                        # print(v_pred[0, 0, 0, :10])
-
-                        # Test by JA
-                        nonlocal v_pred
-                        v_pred = v_pred_zero123plus
-
-                        return callback_kwargs
-
-                    pipeline_result = self.zero123plus(
-                        cond_image_pil_rgba,
-                        depth_image=depth_image_pil_rgba,
-                        num_inference_steps=1,
-                        timesteps=[t.item()],
-                        guidance_scale=guidance_scale,
-                        latents=latents_noisy, # (= z_t)
-                        callback_on_step_end=callback_on_step_end,
-                        callback_on_step_end_tensor_inputs=["latents", "noise_pred"]
-                    ).images[0]
 
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
@@ -811,8 +847,6 @@ class ConTEXTure:
                     
                     # Calculate the Fisher Divergence, which is the squared distance between the scores.
                     # For v-prediction, the score difference is (v_pred - v) / (alpha_t * sigma_t)
-                    # alpha_t = sqrt_alphas_cumprod
-                    # sigma_t = sqrt_one_minus_alphas_cumprod
                     
                     # Avoid division by zero at t=0
                     sigma_t = sqrt_one_minus_alphas_cumprod.clamp(min=1e-8)
@@ -841,18 +875,17 @@ class ConTEXTure:
                 scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean.float(), tile_size=40)
                 targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
 
-                index_to_train = random.randint(0, 5)
-
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
-                    # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
-                    # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                    scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
+                    targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     # scaled_latents_clean.float(),
                     # targets,
-                    scaled_latents_split[index_to_train],
-                    targets_split[index_to_train],
+                    # scaled_latentㅋ,
                     reduction='mean'
                 ) / scaled_latents_clean.shape[0]
+
+                tv_loss = 0 #self.total_variation_loss(self.mesh_model.get_texture_map()[0])
 
                 consistency_reward = 0#self.compute_view_consistency(
                 #     rendered_six_views_clean,
@@ -861,7 +894,7 @@ class ConTEXTure:
                 #     render_cache['face_vertices_image'][1:]
                 # )
 
-                loss = sds_loss #- 500 * consistency_reward
+                loss = sds_loss #+ tv_loss * 0.1 #- 500 * consistency_reward
                 # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
@@ -878,6 +911,7 @@ class ConTEXTure:
                     "fisher_divergence_t": fisher_divergence_t,
                     "ikl_running_avg": ikl_running_avg,
                     "sds_loss": sds_loss,
+                    "tv_loss": tv_loss,
                     "consistency_reward": consistency_reward,
                     "t": t
                 })
