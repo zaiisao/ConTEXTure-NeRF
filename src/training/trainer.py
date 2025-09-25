@@ -299,11 +299,12 @@ class ConTEXTure:
             torch_dtype=torch.float16
         )
 
+        pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
+
         pipeline.add_controlnet(ControlNetModel.from_pretrained(
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
-        pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 
         pipeline._callback_tensor_inputs += ["noise_pred"]
 
@@ -671,7 +672,7 @@ class ConTEXTure:
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                timestep_scheme = "dreamtime"
+                timestep_scheme = "basic_annealing"
                 assert timestep_scheme in ["basic_annealing", "random", "dreamtime"]
 
                 if timestep_scheme == "basic_annealing":
@@ -765,7 +766,7 @@ class ConTEXTure:
                     # I ask this question, because  you set is_cfg_guidance=False). 
                     # I would guess that  the “uncond” branch is not truly unconditional; 
                     # Check what happens when is_cfg_guidance=True (in the first call of unet) and False (in the second call of the unet)
-                    guidance_scale = 10
+                    guidance_scale = 4
                     # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
 
                     v_pred = None
@@ -827,7 +828,7 @@ class ConTEXTure:
                         beta = 0.99  # Smoothing factor
                         ikl_running_avg = beta * ikl_running_avg + (1 - beta) * fisher_divergence_t.item()
 
-                grad_scale = 0.2
+                grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
                 grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
                 # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
@@ -850,7 +851,7 @@ class ConTEXTure:
                     # targets,
                     scaled_latents_split[index_to_train],
                     targets_split[index_to_train],
-                    reduction='sum'
+                    reduction='mean'
                 ) / scaled_latents_clean.shape[0]
 
                 consistency_reward = 0#self.compute_view_consistency(
@@ -860,7 +861,7 @@ class ConTEXTure:
                 #     render_cache['face_vertices_image'][1:]
                 # )
 
-                loss = sds_loss - 500 * consistency_reward
+                loss = sds_loss #- 500 * consistency_reward
                 # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
