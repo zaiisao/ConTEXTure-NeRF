@@ -115,8 +115,11 @@ class MomentumBuffer:
         self.running_average = 0
 
     def update(self, update_value: torch.Tensor):
-        new_average = self.momentum * self.running_average
-        self.running_average = update_value + new_average
+        if not isinstance(self.running_average, torch.Tensor):
+            self.running_average = update_value
+        else:
+            new_average = self.momentum * self.running_average.detach()
+            self.running_average = update_value + new_average
 
 def project(
     v0: torch.Tensor, # [B, C, H, W]
@@ -134,8 +137,8 @@ def adaptive_projected_guidance(
     pred_uncond: torch.Tensor, # [B, C, H, W]
     guidance_scale: float,
     momentum_buffer: MomentumBuffer = None,
-    eta: float = 1.0,
-    norm_threshold: float = 0.0,
+    eta: float = 0.1,
+    norm_threshold: float = 2.5,
 ):
     diff = pred_cond - pred_uncond
     if momentum_buffer is not None:
@@ -724,7 +727,7 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
-        momentum_buffer = MomentumBuffer(momentum=-0.75)
+        momentum_buffer = MomentumBuffer(momentum=-1.25)
 
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
@@ -830,11 +833,8 @@ class ConTEXTure:
                     pred_cond=z0_pred_cond,
                     pred_uncond=z0_pred_uncond,
                     guidance_scale=100.0,
-                    momentum_buffer=None,#momentum_buffer,
-                    eta=0.0,
-                    norm_threshold=0.0
+                    momentum_buffer=momentum_buffer
                 )
-
 
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
@@ -876,15 +876,17 @@ class ConTEXTure:
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
-                scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean.float(), tile_size=40)
+                scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean, tile_size=40)
                 targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
 
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
-                    scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
-                    targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                    # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
+                    # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
                     # scaled_latents_clean.float(),
                     # targets,
+                    scaled_latents_split.float(),
+                    targets_split,
                     reduction='mean'
                 ) / scaled_latents_clean.shape[0]
 
