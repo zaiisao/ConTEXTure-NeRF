@@ -824,14 +824,14 @@ class ConTEXTure:
 
                 # guidance_scale = 4
                 # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
-                alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
-                sigma_t = (1 - alpha_t).sqrt()
-                z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
-                z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
+                # alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
+                # sigma_t = (1 - alpha_t).sqrt()
+                # z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
+                # z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
 
                 v_pred = adaptive_projected_guidance(
-                    pred_cond=z0_pred_cond,
-                    pred_uncond=z0_pred_uncond,
+                    pred_cond=v_pred_text,
+                    pred_uncond=v_pred_uncond,
                     guidance_scale=100.0,
                     momentum_buffer=momentum_buffer
                 )
