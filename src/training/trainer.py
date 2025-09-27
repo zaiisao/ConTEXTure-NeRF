@@ -137,7 +137,7 @@ def adaptive_projected_guidance(
     pred_uncond: torch.Tensor, # [B, C, H, W]
     guidance_scale: float,
     momentum_buffer: MomentumBuffer = None,
-    eta: float = 0.1,
+    eta: float = 0.0,
     norm_threshold: float = 2.5,
 ):
     diff = pred_cond - pred_uncond
@@ -672,7 +672,7 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-5, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -719,7 +719,7 @@ class ConTEXTure:
 
         alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
 
-        iterations = 5000
+        iterations = 1000
         ikl_running_avg = None
 
         import wandb
@@ -727,14 +727,14 @@ class ConTEXTure:
             project="ConTEXTure-NeRF"
         )
 
-        momentum_buffer = MomentumBuffer(momentum=-1.25)
+        # momentum_buffer = MomentumBuffer(momentum=-1.25)
 
         # --- 3. MAIN SDS OPTIMIZATION LOOP ---
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                timestep_scheme = "random"
-                assert timestep_scheme in ["basic_annealing", "random", "dreamtime"]
+                timestep_scheme = "dreamtime"
+                assert timestep_scheme in ["basic_annealing", "random", "dreamtime", "linear_decrease"]
 
                 if timestep_scheme == "basic_annealing":
                     t_max_start = 980  # Start with high-noise timesteps (coarse details).
@@ -757,7 +757,10 @@ class ConTEXTure:
                     dreamtime_scheduler = DreamTimeScheduler(alphas_cumprod, iterations, m=500, s=125)
 
                     t_int = dreamtime_scheduler.get_t(i)
-                    t = torch.tensor([t_int], device=self.device) # Ensure t is a tensor
+                    t = torch.tensor([t_int], device=self.device)
+                elif timestep_scheme == "linear_decrease":
+                    progress = min(i / iterations, 1.0)
+                    t = torch.tensor([int(800 * (1 - progress))], device=self.device)
 
                 optimizer.zero_grad()
 
@@ -833,8 +836,15 @@ class ConTEXTure:
                     pred_cond=v_pred_text,
                     pred_uncond=v_pred_uncond,
                     guidance_scale=100.0,
-                    momentum_buffer=momentum_buffer
+                    # momentum_buffer=momentum_buffer
                 )
+
+                with torch.no_grad():
+                    latents = scheduler.step(v_pred, t, scaled_latents_clean, return_dict=False)[0]
+                    latents = unscale_latents(latents).half()
+                    image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
+                    image = self.zero123plus.image_processor.postprocess(image, output_type="pil")[0]
+                    image.save(f"/home/sogang/jaehoon/contexture_pipeline_test/{i}.png")
 
                 # JA: Calculate SDS loss gradient
                 sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
@@ -868,10 +878,13 @@ class ConTEXTure:
 
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
-                grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
+                # grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
+                grad = v_pred - v
                 # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
                 #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
-                grad = torch.nan_to_num(grad)
+                # grad = torch.nan_to_num(grad)
+                if torch.isnan(grad).any():
+                    print("!!!!!! GRADIENT IS NaN !!!!!!")
 
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
@@ -890,7 +903,9 @@ class ConTEXTure:
                     reduction='mean'
                 ) / scaled_latents_clean.shape[0]
 
-                tv_loss = 0 #self.total_variation_loss(self.mesh_model.get_texture_map()[0])
+                tv_loss = 0
+                # if i > 200:
+                #     tv_loss += self.total_variation_loss(self.mesh_model.get_texture_map()[0]) * 0.005
 
                 consistency_reward = 0#self.compute_view_consistency(
                 #     rendered_six_views_clean,
@@ -899,7 +914,7 @@ class ConTEXTure:
                 #     render_cache['face_vertices_image'][1:]
                 # )
 
-                loss = sds_loss #+ tv_loss * 0.1 #- 500 * consistency_reward
+                loss = sds_loss + tv_loss  #- 500 * consistency_reward
                 # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
@@ -944,7 +959,6 @@ class ConTEXTure:
                     self.log_train_image((unscale_image(rendered_grid_clean) + 1) / 2, f'rendered_grid_clean_{i}')
 
                 # pbar.set_description(f"SDS Texture Optimization: Iter {i}, Loss: {loss_for_logging:.4f}")
-                pbar.update(1)
 
         self.mesh_model.change_default_to_median()
         logger.info('Finished SDS Painting ^_^')
