@@ -16,3 +16,4 @@ src/zero123/CLIP/
 src/zero123/taming-transformers/
 render_dataset/
 midas_models/
+wandb/
