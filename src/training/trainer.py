@@ -31,6 +31,7 @@ from src.stable_diffusion_depth import StableDiffusion
 from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, MultiviewDataset
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid, split_3x2_grid_to_tensor_with_6_elements
 from src.run_nerf_helpers import *
+from src.optimizer import Adan
 
 from PIL import Image, ImageDraw
 from scipy.interpolate import interp1d
@@ -73,7 +74,8 @@ class DreamTimeScheduler:
         # Pre-compute the weights W(t) for all timesteps t in [0, T-1]
         
         # 1. Diffusion Prior W_d(t) based on SNR (Eq. 6-7, Source 313, 317)
-        w_d = torch.sqrt(1 - alphas_cumprod)
+        # w_d = torch.sqrt(1 - alphas_cumprod)
+        w_d = torch.sqrt((1 - alphas_cumprod) / (alphas_cumprod + 1e-9))
 
         # 2. Perception Prior W_p(t), a Gaussian bell curve (Source 417)
         timesteps = torch.arange(self.T, device=self.device)
@@ -177,7 +179,7 @@ class ConTEXTure:
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
         
-        self.uv_embedder, input_ch_uv = get_embedder(multires=12) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+        self.uv_embedder, input_ch_uv = get_embedder(multires=32) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         
@@ -672,7 +674,8 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
+        # optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4, eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -719,7 +722,7 @@ class ConTEXTure:
 
         alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
 
-        iterations = 1000
+        iterations = 500
         ikl_running_avg = None
 
         import wandb
@@ -733,20 +736,20 @@ class ConTEXTure:
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-                timestep_scheme = "dreamtime"
-                assert timestep_scheme in ["basic_annealing", "random", "dreamtime", "linear_decrease"]
+                timestep_scheme = "prolificdreamer"
+                assert timestep_scheme in ["basic_annealing", "random", "dreamtime", "linear_decrease", "prolificdreamer"]
 
                 if timestep_scheme == "basic_annealing":
                     t_max_start = 980  # Start with high-noise timesteps (coarse details).
                     t_max_end = 50     # End with low-noise timesteps (fine details).
-                    annealing_period = 7500 # Number of iterations to perform the annealing over.
+                    annealing_period = 750 # Number of iterations to perform the annealing over.
 
                     # Calculate the current progress through the annealing period.
                     progress = min(i / annealing_period, 1.0)
-                    
+
                     # Linearly interpolate the max timestep.
                     current_t_max = int(t_max_start * (1 - progress) + t_max_end * progress)
-                    
+
                     # Sample a random timestep from the annealed range.
                     t = torch.randint(t_max_end, current_t_max + 1, (1,), device=self.device).long()
                     # t = timesteps[t]
@@ -760,7 +763,19 @@ class ConTEXTure:
                     t = torch.tensor([t_int], device=self.device)
                 elif timestep_scheme == "linear_decrease":
                     progress = min(i / iterations, 1.0)
-                    t = torch.tensor([int(800 * (1 - progress))], device=self.device)
+                    t = torch.tensor([int((iterations - 1) * (1 - progress))], device=self.device)
+                elif timestep_scheme == "prolificdreamer":
+                    anneal_point = 200
+                    if i < anneal_point:
+                        min_step_percent = 0.02
+                        max_step_percent = 0.98
+                    else:
+                        min_step_percent = 0.02
+                        max_step_percent = 0.50
+
+                    t_min = int(min_step_percent * num_timesteps)
+                    t_max = int(max_step_percent * num_timesteps)
+                    t = torch.randint(t_min, t_max, (1,), device=self.device).long()
 
                 optimizer.zero_grad()
 
@@ -811,35 +826,35 @@ class ConTEXTure:
                     latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(-1))
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
-                latent_model_input = torch.cat([latents_noisy] * 2)
-                latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-                latent_model_input = latent_model_input.half()
+                    latent_model_input = torch.cat([latents_noisy] * 2)
+                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = latent_model_input.half()
 
-                v_pred = unet(
-                    latent_model_input, t,
-                    encoder_hidden_states=encoder_hidden_states,
-                    cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
-                    return_dict=False,
-                )[0]
+                    v_pred = unet(
+                        latent_model_input, t,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
+                        return_dict=False,
+                    )[0]
 
-                # Perform guidance
-                v_pred_uncond, v_pred_text = v_pred.chunk(2)
+                    # Perform guidance
+                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
 
-                # guidance_scale = 4
-                # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
-                # alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
-                # sigma_t = (1 - alpha_t).sqrt()
-                # z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
-                # z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
+                    # guidance_scale = 4
+                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                    # alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
+                    # sigma_t = (1 - alpha_t).sqrt()
+                    # z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
+                    # z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
 
-                v_pred = adaptive_projected_guidance(
-                    pred_cond=v_pred_text,
-                    pred_uncond=v_pred_uncond,
-                    guidance_scale=100.0,
-                    # momentum_buffer=momentum_buffer
-                )
+                    v_pred = adaptive_projected_guidance(
+                        pred_cond=v_pred_text,
+                        pred_uncond=v_pred_uncond,
+                        guidance_scale=500.0,
+                        # momentum_buffer=momentum_buffer
+                    )
 
-                with torch.no_grad():
+                # with torch.no_grad():
                     latents = scheduler.step(v_pred, t, scaled_latents_clean, return_dict=False)[0]
                     latents = unscale_latents(latents).half()
                     image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
@@ -878,13 +893,13 @@ class ConTEXTure:
 
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
+
+                # JA: The original formula for the grad is as follows:
                 # grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
-                grad = v_pred - v
+                grad = sqrt_alphas_cumprod * (v_pred - v)
                 # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
                 #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
                 # grad = torch.nan_to_num(grad)
-                if torch.isnan(grad).any():
-                    print("!!!!!! GRADIENT IS NaN !!!!!!")
 
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
