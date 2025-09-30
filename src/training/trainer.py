@@ -32,6 +32,7 @@ from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, Multivi
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid, split_3x2_grid_to_tensor_with_6_elements
 from src.run_nerf_helpers import *
 from src.optimizer import Adan
+from src.models.gridencoder import GridEncoder
 
 from PIL import Image, ImageDraw
 from scipy.interpolate import interp1d
@@ -158,6 +159,27 @@ def adaptive_projected_guidance(
     pred_guided = pred_cond + (guidance_scale - 1) * normalized_update
     return pred_guided
 
+# JA: get_grid_encoder and GridEncoder is adapted from https://github.com/ashawkey/torch-ngp
+# Corresponding paper: https://arxiv.org/pdf/2201.05989
+def get_grid_encoder(input_dim=2, 
+                multires=8, 
+                degree=4,
+                num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=14, desired_resolution=2048, align_corners=False,
+                **kwargs):
+
+    encoder = GridEncoder(
+        input_dim=input_dim,
+        num_levels=num_levels,
+        level_dim=level_dim,
+        base_resolution=base_resolution,
+        log2_hashmap_size=log2_hashmap_size,
+        desired_resolution=desired_resolution,
+        gridtype='hash',
+        align_corners=align_corners
+    )
+
+    return encoder, encoder.output_dim
+
 class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -179,11 +201,12 @@ class ConTEXTure:
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
         
-        self.uv_embedder, input_ch_uv = get_embedder(multires=32) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+        # self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+        self.uv_embedder, input_ch_uv = get_grid_encoder()
 
         # The 2D NeRF model, with input dimensions matching the embedder's output
         
-        self.texture_mlp = NeRF2D(D=8, W=256, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
+        self.texture_mlp = NeRF2D(D=8, W=128, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
         if torch.cuda.device_count() > 1:
             self.texture_mlp = nn.DataParallel(self.texture_mlp)
 
@@ -675,42 +698,55 @@ class ConTEXTure:
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
         # optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
-        optimizer = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4, eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
+        # optimizer = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4, eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
+        optimizer = torch.optim.AdamW(
+            self.mesh_model.get_params_texture_atlas(), 
+            lr=5e-4, 
+            betas=(0.9, 0.99),
+            eps=1e-15
+        )
+
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
         
         with torch.no_grad():
             # JA: cond_image_pil is the front view image with a gray background
+            #MJ: Get the image feature of the condition image for "reference [cross] attention"
             cond_image_vae = self.zero123plus.feature_extractor_vae(
                 images=cond_image_pil_rgb,
                 return_tensors="pt"
             ).pixel_values.to(device=self.device, dtype=vae.dtype)
-
+            
+            #MJ: Get the image feature of  the condition image for "usual [semantic] cross attention"
+            
             cond_image_clip = self.zero123plus.feature_extractor_clip(
                 images=cond_image_pil_rgb,
                 return_tensors="pt"
             ).pixel_values.to(device=self.device, dtype=unet.dtype)
 
-            # JA: cond_lat is from the front view image
+            # JA: cond_lat is from the front view image: MJ: get the latent image of the reference image
             cond_lat = vae.encode(cond_image_vae).latent_dist.sample()
             
-            # JA: Get unconditional latent for guidance
+            # JA: Get unconditional latent the reference image [for reference attention]
             negative_lat = vae.encode(torch.zeros_like(cond_image_vae)).latent_dist.sample()
             
+            #MJ: get the latent image of the semantic cross-attention  image
             encoded = self.zero123plus.vision_encoder(cond_image_clip, output_hidden_states=False)
             global_embeds = encoded.image_embeds.unsqueeze(-2)
             
             # JA: Get text embeddings (for empty prompt) and combine with vision embeddings
-            text_embeds = self.zero123plus.encode_prompt("", self.device, 1, False)[0]
+            text_embeds = self.zero123plus.encode_prompt("", self.device, 1, False)[0] #MJ: there is a real text_embeds, but in the current release of zero123++, it is omitted
             ramp = global_embeds.new_tensor(self.zero123plus.config.ramping_coefficients).unsqueeze(-1)
             cond_encoder_hidden_states = text_embeds + global_embeds * ramp
             
-            # JA: Get unconditional text embeddings
+            # JA: Get unconditional text embeddings: 
             uncond_embeds = self.zero123plus.encode_prompt("", self.device, 1, True)[1]
             
-            # JA: Concatenate for classifier-free guidance
+            # JA: Concatenate for classifier-free guidance:
+            #MJ: For the semantic cross attention
             encoder_hidden_states = torch.cat([uncond_embeds, cond_encoder_hidden_states])
+            #MJ: For the reference image cross attention
             clean_cond_lat = torch.cat([negative_lat, cond_lat])
 
             # JA: Prepare depth map tensor for ControlNet
@@ -765,7 +801,7 @@ class ConTEXTure:
                     progress = min(i / iterations, 1.0)
                     t = torch.tensor([int((iterations - 1) * (1 - progress))], device=self.device)
                 elif timestep_scheme == "prolificdreamer":
-                    anneal_point = 200
+                    anneal_point = 125
                     if i < anneal_point:
                         min_step_percent = 0.02
                         max_step_percent = 0.98
@@ -826,7 +862,9 @@ class ConTEXTure:
                     latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(-1))
                     latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
 
-                    latent_model_input = torch.cat([latents_noisy] * 2)
+                    #MJ: We have parallel  batches for the unet, one for the uncond prompt and the other for the cond promt;
+                    # So, provide 
+                    latent_model_input = torch.cat([latents_noisy] * 2) 
                     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
                     latent_model_input = latent_model_input.half()
 
@@ -838,7 +876,7 @@ class ConTEXTure:
                     )[0]
 
                     # Perform guidance
-                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
+                    v_pred_uncond, v_pred_text = v_pred.chunk(2) # v_pred = (B * 2, 4, H // 8, W // 8)
 
                     # guidance_scale = 4
                     # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
@@ -919,8 +957,8 @@ class ConTEXTure:
                 ) / scaled_latents_clean.shape[0]
 
                 tv_loss = 0
-                # if i > 200:
-                #     tv_loss += self.total_variation_loss(self.mesh_model.get_texture_map()[0]) * 0.005
+                # if i > iterations * 0.25:
+                    # tv_loss += self.total_variation_loss(self.mesh_model.get_texture_map()[0]) * 0.1
 
                 consistency_reward = 0#self.compute_view_consistency(
                 #     rendered_six_views_clean,

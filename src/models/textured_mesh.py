@@ -412,7 +412,16 @@ class TexturedMeshModel(nn.Module):
         raise NotImplementedError
 
     def get_params_texture_atlas(self):
-        return list(self.texture_mlp.parameters())
+        # return list(self.texture_mlp.parameters()) + list(self.uv_embedder.parameters())
+
+        param_groups = [
+            {'params': self.uv_embedder.parameters(), 'weight_decay': 0.0}, # No weight decay for the hash grid
+            {'params': self.texture_mlp.parameters(), 'weight_decay': 1e-6}      # L2 regularization for the MLP only
+        ]
+
+        return param_groups
+
+
 
     @torch.no_grad()
     def export_mesh(self, path):
