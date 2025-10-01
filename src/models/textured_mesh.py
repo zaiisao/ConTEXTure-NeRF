@@ -270,32 +270,14 @@ class TexturedMeshModel(nn.Module):
             torch.linspace(0, 1, res, device=self.device), 
             torch.linspace(0, 1, res, device=self.device), 
             indexing='xy'), dim=-1).reshape(-1, 2)
-        
-        # 1. Create a second set of UVs rotated by 45 degrees
-        # theta = torch.tensor(np.pi / 4, device=self.device) # 45 degrees
-        # rot_matrix = torch.tensor([
-        #     [torch.cos(theta), -torch.sin(theta)],
-        #     [torch.sin(theta), torch.cos(theta)]
-        # ], device=self.device, dtype=torch.float32)
-        
-        # # Center coords around 0, rotate, then shift back to [0, 1] range
-        # uv_coords_centered = uv_coords - 0.5
-        # uv_coords_rotated = uv_coords_centered @ rot_matrix.T
-        # uv_coords_rotated = uv_coords_rotated + 0.5
-        
-        # # 2. Embed both original and rotated coordinates
-        # uv_coords_flat = uv_coords.reshape(-1, 2)
-        # uv_coords_rotated_flat = uv_coords_rotated.reshape(-1, 2)
 
-        # embedded_uvs = self.uv_embedder(uv_coords_flat)
-        # embedded_uvs_rotated = self.uv_embedder(uv_coords_rotated_flat)
-        embedded_uvs = self.uv_embedder(uv_coords_flat)
+        if self.uv_embedder is not None:
+            embedded_uvs = self.uv_embedder(uv_coords_flat)
+            mlp_output = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
+        else:
+            # JA: If self.uv_embedder is None, we expect the embedder to be included in the MLP function
+            mlp_output = self.texture_mlp(uv_coords_flat)
 
-        # combined_features = torch.cat([embedded_uvs, embedded_uvs_rotated], dim=-1)
-
-        # mlp_output = self.texture_mlp(combined_features)
-
-        mlp_output = self.texture_mlp(embedded_uvs) # JA: texture_colors.shape = (res * res, 3)
         texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
         
         return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2), mlp_output
@@ -412,16 +394,12 @@ class TexturedMeshModel(nn.Module):
         raise NotImplementedError
 
     def get_params_texture_atlas(self):
-        # return list(self.texture_mlp.parameters()) + list(self.uv_embedder.parameters())
+        params = list(self.texture_mlp.parameters())
+        
+        if self.uv_embedder is not None:
+            params += list(self.uv_embedder.parameters())
 
-        param_groups = [
-            {'params': self.uv_embedder.parameters(), 'weight_decay': 0.0}, # No weight decay for the hash grid
-            {'params': self.texture_mlp.parameters(), 'weight_decay': 1e-6}      # L2 regularization for the MLP only
-        ]
-
-        return param_groups
-
-
+        return params
 
     @torch.no_grad()
     def export_mesh(self, path):

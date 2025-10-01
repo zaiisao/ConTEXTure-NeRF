@@ -32,7 +32,6 @@ from src.training.views_dataset import Zero123PlusDataset, ViewsDataset, Multivi
 from src.utils import make_path, tensor2numpy, pad_tensor_to_size, split_zero123plus_grid, split_3x2_grid_to_tensor_with_6_elements
 from src.run_nerf_helpers import *
 from src.optimizer import Adan
-from src.models.gridencoder import GridEncoder
 
 from PIL import Image, ImageDraw
 from scipy.interpolate import interp1d
@@ -159,27 +158,6 @@ def adaptive_projected_guidance(
     pred_guided = pred_cond + (guidance_scale - 1) * normalized_update
     return pred_guided
 
-# JA: get_grid_encoder and GridEncoder is adapted from https://github.com/ashawkey/torch-ngp
-# Corresponding paper: https://arxiv.org/pdf/2201.05989
-def get_grid_encoder(input_dim=2, 
-                multires=8, 
-                degree=4,
-                num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=14, desired_resolution=2048, align_corners=False,
-                **kwargs):
-
-    encoder = GridEncoder(
-        input_dim=input_dim,
-        num_levels=num_levels,
-        level_dim=level_dim,
-        base_resolution=base_resolution,
-        log2_hashmap_size=log2_hashmap_size,
-        desired_resolution=desired_resolution,
-        gridtype='hash',
-        align_corners=align_corners
-    )
-
-    return encoder, encoder.output_dim
-
 class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -200,15 +178,31 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-        
-        # self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
-        self.uv_embedder, input_ch_uv = get_grid_encoder()
+        self.prolificdreamer = True
 
-        # The 2D NeRF model, with input dimensions matching the embedder's output
-        
-        self.texture_mlp = NeRF2D(D=8, W=128, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
-        if torch.cuda.device_count() > 1:
-            self.texture_mlp = nn.DataParallel(self.texture_mlp)
+        mlp_args = {
+            'D': 8,
+            'W': 128,
+            # 'input_ch': 2,
+            'output_ch': 3,
+            'skips': [4]
+        }
+        if self.prolificdreamer:
+            self.uv_embedder = None
+            self.texture_mlp = NeRF2DNetwork(n_particles=3, **mlp_args)
+        else:
+            # self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
+            self.uv_embedder, output_dim = get_grid_encoder()
+
+            # The 2D NeRF model, with input dimensions matching the embedder's output
+            
+            self.texture_mlp = NeRF2D(D=8,
+            W=128,
+            input_ch=output_dim,
+            output_ch=3,
+            skips=[4]).to(self.device)
+            if torch.cuda.device_count() > 1:
+                self.texture_mlp = nn.DataParallel(self.texture_mlp)
 
         # You should also pass these new components to your mesh model
         self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
@@ -226,7 +220,6 @@ class ConTEXTure:
             self.device).permute(2, 0, 1) / 255.0
 
         self.zero123_front_input = None
-        
        
     def create_face_view_map(self, face_idx):
         num_views, _, H, W = face_idx.shape  # Assume face_idx shape is (B, 1, H, W)
@@ -381,11 +374,59 @@ class ConTEXTure:
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
-
-        pipeline._callback_tensor_inputs += ["noise_pred"]
+        # pipeline._callback_tensor_inputs += ["noise_pred"]
 
         pipeline.prepare()
         pipeline.to(self.device)
+
+        if self.prolificdreamer:
+            import copy
+
+            _unet = copy.deepcopy(pipeline.unet)
+            _unet.requires_grad_(False)
+
+            device = self.device
+
+            from diffusers.loaders import AttnProcsLayers
+            from diffusers.models.attention_processor import LoRAAttnProcessor
+
+            # JA: Code in this block was retrieved from https://github.com/thu-ml/prolificdreamer/blob/main/nerf/utils.py
+            lora_attn_procs = {}
+            for name in _unet.attn_processors.keys():
+                cross_attention_dim = None if name.endswith("attn1.processor") else _unet.config.cross_attention_dim
+                if name.startswith("mid_block"):
+                    hidden_size = _unet.config.block_out_channels[-1]
+                elif name.startswith("up_blocks"):
+                    block_id = int(name[len("up_blocks.")])
+                    hidden_size = list(reversed(_unet.config.block_out_channels))[block_id]
+                elif name.startswith("down_blocks"):
+                    block_id = int(name[len("down_blocks.")])
+                    hidden_size = _unet.config.block_out_channels[block_id]
+                lora_attn_procs[name] = LoRAAttnProcessor(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim)
+            _unet.set_attn_processor(lora_attn_procs)
+            lora_layers = AttnProcsLayers(_unet.attn_processors)
+
+            # text_input = self.guidance.tokenizer("", padding='max_length', max_length=self.guidance.tokenizer.model_max_length, truncation=True, return_tensors='pt')
+            # with torch.no_grad():
+            #     text_embeddings = self.guidance.text_encoder(text_input.input_ids.to(self.guidance.device))[0]
+            
+            class LoraUnet(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.unet = _unet
+                    self.sample_size = 64
+                    self.in_channels = 4
+                    self.device = device
+                    self.dtype = torch.float32
+                    # self.text_embeddings = text_embeddings
+
+                def forward(self, *args, **kwargs):
+                    # textemb = einops.repeat(self.text_embeddings, '1 L D -> B L D', B=x.shape[0]).to(device)
+                    return self.unet(*args, **kwargs)
+            
+            # self._unet = _unet
+            self.lora_layers = lora_layers
+            self.lora_unet = LoraUnet().to(device)
 
         pipeline.inpaint_unet = self.diffusion.inpaint_unet
 
@@ -697,14 +738,27 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        # optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
-        # optimizer = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4, eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
-        optimizer = torch.optim.AdamW(
-            self.mesh_model.get_params_texture_atlas(), 
-            lr=5e-4, 
-            betas=(0.9, 0.99),
-            eps=1e-15
+
+        mlp_optimizer = Adan(
+            self.mesh_model.get_params_texture_atlas(),
+            lr=5e-4,
+            eps=1e-18,
+            weight_decay=2e-5,
+            max_grad_norm=5.0,
+            foreach=False
         )
+
+        if self.prolificdreamer:
+            params = [
+                {'params': self.lora_layers.parameters()}
+            ] 
+
+            lora_optimizer = torch.optim.AdamW(
+                params, 
+                lr=5e-4, 
+                betas=(0.9, 0.99),
+                eps=1e-15
+            )
 
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
@@ -772,7 +826,14 @@ class ConTEXTure:
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
+
                 timestep_scheme = "prolificdreamer"
+
+                if self.prolificdreamer:
+                    timestep_scheme = "prolificdreamer"
+
+                particle_i = random.randrange(2)
+
                 assert timestep_scheme in ["basic_annealing", "random", "dreamtime", "linear_decrease", "prolificdreamer"]
 
                 if timestep_scheme == "basic_annealing":
@@ -813,7 +874,9 @@ class ConTEXTure:
                     t_max = int(max_step_percent * num_timesteps)
                     t = torch.randint(t_min, t_max, (1,), device=self.device).long()
 
-                optimizer.zero_grad()
+                mlp_optimizer.zero_grad()
+                if self.prolificdreamer:
+                    lora_optimizer.zero_grad()
 
                 # --- Render Student and Prepare Latents ---
                 outputs = self.mesh_model.render(render_cache=render_cache, background=background_gray)
@@ -850,9 +913,9 @@ class ConTEXTure:
 
                 scaled_latents_clean = scale_latents(latents_clean)
 
-                # alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
-                # sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
-                # sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
+                # JA: Calculate SDS loss gradient
+                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
+                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
 
                 with torch.no_grad():
                     noise = torch.randn_like(scaled_latents_clean)
@@ -864,11 +927,11 @@ class ConTEXTure:
 
                     #MJ: We have parallel  batches for the unet, one for the uncond prompt and the other for the cond promt;
                     # So, provide 
-                    latent_model_input = torch.cat([latents_noisy] * 2) 
+                    latent_model_input = torch.cat([latents_noisy] * 2) # JA: latents_noisy is the x_t obtained from the rendered image x_0
                     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
                     latent_model_input = latent_model_input.half()
 
-                    v_pred = unet(
+                    noisy_v_pred = unet(
                         latent_model_input, t,
                         encoder_hidden_states=encoder_hidden_states,
                         cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
@@ -876,34 +939,37 @@ class ConTEXTure:
                     )[0]
 
                     # Perform guidance
-                    v_pred_uncond, v_pred_text = v_pred.chunk(2) # v_pred = (B * 2, 4, H // 8, W // 8)
+                    noisy_v_pred_uncond, noisy_v_pred_text = noisy_v_pred.chunk(2) # v_pred = (B * 2, 4, H // 8, W // 8)
 
-                    # guidance_scale = 4
-                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
-                    # alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
-                    # sigma_t = (1 - alpha_t).sqrt()
-                    # z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
-                    # z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
+                    if self.prolificdreamer:
+                        # JA: ProlificDreamer allows us to use CFG with low guidance scales in the training of the NeRF model
+                        guidance_scale = 4
+                        noisy_v_pred = noisy_v_pred_uncond + guidance_scale * (noisy_v_pred_text - noisy_v_pred_uncond)
 
-                    v_pred = adaptive_projected_guidance(
-                        pred_cond=v_pred_text,
-                        pred_uncond=v_pred_uncond,
-                        guidance_scale=500.0,
-                        # momentum_buffer=momentum_buffer
-                    )
+                        noisy_v_pred_q = self.lora_unet(
+                            latents_noisy, t,
+                            encoder_hidden_states=cond_encoder_hidden_states,
+                            cross_attention_kwargs=dict(cond_lat=cond_lat, control_depth=depth_tensor),
+                            return_dict=False,
+                        )[0]
+
+                        noisy_v_pred_q = sqrt_alphas_cumprod * noisy_v_pred_q + sqrt_one_minus_alphas_cumprod * latents_noisy
+                    else:
+                        noisy_v_pred = adaptive_projected_guidance(
+                            pred_cond=noisy_v_pred_text,
+                            pred_uncond=noisy_v_pred_uncond,
+                            guidance_scale=500.0,
+                            # momentum_buffer=momentum_buffer
+                        )
 
                 # with torch.no_grad():
-                    latents = scheduler.step(v_pred, t, scaled_latents_clean, return_dict=False)[0]
+                    latents = scheduler.step(noisy_v_pred, t, scaled_latents_clean, return_dict=False)[0]
                     latents = unscale_latents(latents).half()
                     image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
                     image = self.zero123plus.image_processor.postprocess(image, output_type="pil")[0]
                     image.save(f"/home/sogang/jaehoon/contexture_pipeline_test/{i}.png")
-
-                # JA: Calculate SDS loss gradient
-                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
-                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 
-                v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
+                noisy_v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
 
                 with torch.no_grad():
                     #MJ: with torch.no_grad():
@@ -920,7 +986,7 @@ class ConTEXTure:
                     alpha_t = sqrt_alphas_cumprod.clamp(min=1e-8)
 
                     # divergence_at_t = torch.sum(((v_pred.detach() - v.detach()) / (alpha_t * sigma_t)) ** 2)
-                    fisher_divergence_t = torch.sum((alpha_t / sigma_t) ** 2 * torch.abs(v_pred - v) ** 2)
+                    fisher_divergence_t = torch.sum((alpha_t / sigma_t) ** 2 * torch.abs(noisy_v_pred - noisy_v) ** 2)
 
                     # Update the running average (Exponential Moving Average)
                     if ikl_running_avg is None:
@@ -934,25 +1000,18 @@ class ConTEXTure:
 
                 # JA: The original formula for the grad is as follows:
                 # grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
-                grad = sqrt_alphas_cumprod * (v_pred - v)
-                # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
-                #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
-                # grad = torch.nan_to_num(grad)
+                if self.prolificdreamer:
+                    grad = grad_scale * sqrt_alphas_cumprod * (noisy_v_pred - noisy_v_pred_q)
+                else:
+                    grad = grad_scale * sqrt_alphas_cumprod * (noisy_v_pred - noisy_v)
 
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
-                scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean, tile_size=40)
-                targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
-
                 # 3. Calculate the MSE loss: dloss/dtheta
                 sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
-                    # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
-                    # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
-                    # scaled_latents_clean.float(),
-                    # targets,
-                    scaled_latents_split.float(),
-                    targets_split,
+                    scaled_latents_clean.float(),
+                    targets,
                     reduction='mean'
                 ) / scaled_latents_clean.shape[0]
 
@@ -1005,7 +1064,9 @@ class ConTEXTure:
                         logger.info(f"Gradient Norm of Final Layer: {grad_norm}")
                         logger.info(f"---------------------------------")
 
-                optimizer.step()
+                mlp_optimizer.step()
+                if self.prolificdreamer:
+                    lora_optimizer.step()
 
                 if (i % 10 == 0 and i < 1000) or (i % 100 == 0):
                     self.log_texture_map(i)

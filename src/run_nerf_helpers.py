@@ -64,6 +64,30 @@ def get_embedder(multires, i=0):
     embed = lambda x, eo=embedder_obj : eo.embed(x)
     return embed, embedder_obj.out_dim
 
+from src.models.gridencoder import GridEncoder
+
+# JA: get_grid_encoder and GridEncoder is adapted from https://github.com/ashawkey/torch-ngp
+# Corresponding paper: https://arxiv.org/pdf/2201.05989
+def get_grid_encoder(input_dim=2, 
+                multires=8, 
+                degree=4,
+                num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=14, desired_resolution=2048, align_corners=False,
+                **kwargs):
+
+    encoder = GridEncoder(
+        input_dim=input_dim,
+        num_levels=num_levels,
+        level_dim=level_dim,
+        base_resolution=base_resolution,
+        log2_hashmap_size=log2_hashmap_size,
+        desired_resolution=desired_resolution,
+        gridtype='hash',
+        align_corners=align_corners
+    )
+
+    return encoder, encoder.output_dim
+
+
 # Model
 class NeRF2D(nn.Module):
     # def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
@@ -134,6 +158,41 @@ class NeRF2D(nn.Module):
 
         return outputs
 
+import random
+
+class NeRF2DNetwork(nn.Module):
+    def __init__(self, n_particles, **mlp_kwargs):
+        super().__init__()
+
+        self.mlps = []
+        self.encoders = []
+
+        self.n_particles = n_particles
+        self.idx = None
+
+        for _ in range(self.n_particles):
+            encoder, output_dim = get_grid_encoder()
+
+            self.encoders.append(encoder)
+            self.mlps.append(NeRF2D(input_ch=output_dim, **mlp_kwargs))
+
+        self.mlps = nn.ModuleList(self.mlps)
+        self.encoders = nn.ModuleList(self.encoders)
+
+        self.set_idx()
+
+    def set_idx(self, idx=None):
+        if idx == None:
+            self.idx = random.randint(0, self.n_particles-1)
+        else:
+            self.idx = idx
+
+    def forward(self, x, use_encoder=True):
+        if use_encoder:
+            encoded_uvs = self.encoders[self.idx](x)
+            return self.mlps[self.idx](encoded_uvs)
+
+        return self.mlps[self.idx](x)
 
 # Ray helpers
 def get_rays(H, W, K, c2w):
