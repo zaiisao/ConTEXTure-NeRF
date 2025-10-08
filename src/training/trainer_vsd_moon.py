@@ -17,14 +17,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import types
 import random
-# from torchviz import make_dot
 
 from torch_scatter import scatter_max
 
 import torchvision
 from PIL import Image
 from diffusers import DiffusionPipeline, ControlNetModel, DDPMScheduler, EulerAncestralDiscreteScheduler
-from diffusers.training_utils import cast_training_params
 
 from src import utils
 from src.configs.train_config import TrainConfig
@@ -38,6 +36,10 @@ from src.optimizer import Adan
 from PIL import Image, ImageDraw
 from scipy.interpolate import interp1d
 from src.scheduling_euler_ancestral_discrete import StatelessEulerAncestralDiscreteScheduler
+
+#MJ: SimpleNamespace is just a tiny container class from Python’s types module.
+# It lets you create an object with arbitrary attributes, kind of like a super-lightweight class or a dict with dot-access.
+from types import SimpleNamespace
 
 # JA: scale_latents, unscale_latents, scale_image, and unscale_image are from the Zero123++ pipeline code:
 # https://huggingface.co/sudo-ai/zero123plus-pipeline/blob/main/pipeline.py
@@ -56,8 +58,7 @@ def scale_image(image):
 def unscale_image(image):
     image = image / 0.5 * 0.8
     return image
-# Add this import at the top of your file
-import matplotlib.pyplot as plt
+
 
 class DreamTimeScheduler:
     def __init__(self, alphas_cumprod, total_iterations, m=750, s=125):
@@ -161,6 +162,44 @@ def adaptive_projected_guidance(
     pred_guided = pred_cond + (guidance_scale - 1) * normalized_update
     return pred_guided
 
+#MJ: 
+# The particle bank is simply a container that manages these copies and lets you:
+
+# 1)Initialize  n particles (clones of your mesh/texture MLP).
+# 2)Sample one particle uniformly at random each iteration (as in Algorithm-1, line 3).
+# 3)Update the chosen particle’s parameters after θ-update.
+# 4)Optionally, save/load them all at the end.
+
+import random
+import copy
+import torch
+
+class ParticleBank:
+    def __init__(self, base_mesh_model, n: int, device):
+        """
+        base_mesh_model: your mesh_model with texture_mlp
+        n: number of particles
+        """
+        self.particles = []
+        for i in range(n):
+            # deep copy to make independent models
+            model_copy = copy.deepcopy(base_mesh_model).to(device)
+            self.particles.append(model_copy)
+
+    def sample(self):
+        """Randomly pick one particle θ^(i)."""
+        return random.choice(self.particles)
+
+    def all(self):
+        """Return the list of all particles (θ^(i))."""
+        return self.particles
+
+    def parameters(self):
+        """Collect parameters from all particles (for optimizers)."""
+        return [p.parameters() for p in self.particles]
+
+
+
 class ConTEXTure:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -181,39 +220,25 @@ class ConTEXTure:
 
         # JA: From run_nerf_helpers.py
         # The positional embedder for 2D UV coordinates
-        self.prolificdreamer = True
+        
+        self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
 
-        mlp_args = {
-            'D': 8,
-            'W': 128,
-            # 'input_ch': 2,
-            'output_ch': 3,
-            'skips': [4]
-        }
-        if self.prolificdreamer:
-            self.uv_embedder = None
-            
-            self.texture_mlp = NeRF2DNetwork(n_particles=3, **mlp_args)
-        else:
-            # self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
-            self.uv_embedder, output_dim = get_grid_encoder()
-
-            # The 2D NeRF model, with input dimensions matching the embedder's output
-            
-            self.texture_mlp = NeRF2D(input_ch=output_dim, **mlp_args).to(self.device)
-            if torch.cuda.device_count() > 1:
-                self.texture_mlp = nn.DataParallel(self.texture_mlp)
+        # The 2D NeRF model, with input dimensions matching the embedder's output
+        
+        self.texture_mlp = NeRF2D(D=10, W=384, input_ch=input_ch_uv, output_ch=3, skips=[4]).to(self.device)
+        if torch.cuda.device_count() > 1:
+            self.texture_mlp = nn.DataParallel(self.texture_mlp)
 
         # You should also pass these new components to your mesh model
         self.view_dirs = ['front', 'left', 'back', 'right', 'overhead', 'bottom'] # self.view_dirs[dir] when dir = [4] = [right]
         
         self.mesh_model = self.init_mesh_model(texture_mlp=self.texture_mlp, uv_embedder=self.uv_embedder)
-        #MJ: self.mesh_model.texture_mlp is g(theta) for the texture generation
         
-        self.diffusion = self.init_diffusion()
+        self.diffusion = self.init_diffusion() #MJ: ..=StableDiffusion(..)
 
         if self.cfg.guide.use_zero123plus:
-            self.zero123plus = self.init_zero123plus()
+            
+            self.zero123plus = self.init_zero123plus() #MJ: Add the controlNet
 
         self.text_z, self.text_string = self.calc_text_embeddings()
         self.dataloaders = self.init_dataloaders()
@@ -221,6 +246,65 @@ class ConTEXTure:
             self.device).permute(2, 0, 1) / 255.0
 
         self.zero123_front_input = None
+        
+        #MJ: build a particle bank with n copies
+        n_particles = self.cfg.optim.num_particles  # e.g. 4
+        self.particle_bank = ParticleBank(self.mesh_model, n_particles, self.device)
+        
+       #MJ: small object self.vsd to hold all the VSD-related state (optimizers, LoRA layers, helper functions, CFG scale, etc.) 
+       # without polluting the main ConTEXTure namespace
+       
+       #1) Build LoRA on top of Zero123++ UNet 
+       
+       # ADD: Build LoRA adapters on top of the Zero123++ UNet
+        self.vsd = SimpleNamespace()
+
+        unet = self.zero123plus.unet
+        # snapshot "base" attention processors (teacher)
+        self.vsd.base_attn_procs = {name: AttnProcessor2_0() for name in unet.attn_processors.keys()}
+
+        # create LoRA processors (rank=4 is a good start)
+        r = 4
+        self.vsd.lora_attn_procs = {}
+        for name, proc in unet.attn_processors.items():
+            # The UNet attention processors carry hidden_size/cross_attention_dim metadata
+            self.vsd.lora_attn_procs[name] = LoRAAttnProcessor(
+                hidden_size=proc.hidden_size,
+                cross_attention_dim=proc.cross_attention_dim,
+                rank=r
+            )
+
+        # Apply LoRA processors to UNet (we will toggle at runtime)
+        unet.set_attn_processor(self.vsd.lora_attn_procs)
+
+        # Collect LoRA parameters to optimize φ only (base UNet stays frozen)
+        self.vsd.lora_layers = AttnProcsLayers(unet.attn_processors).to(self.device).train()
+
+        # freeze the base UNet weights (teacher is always frozen)
+        for p in unet.parameters():
+            p.requires_grad_(False)
+
+        # optimizers: θ from your mesh/texture atlas; φ from LoRA
+        self.vsd.optim_phi   = AdamW(self.vsd.lora_layers.parameters(), lr=1e-4)
+        self.vsd.optim_theta = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4,
+                                    eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
+
+        # helpers to toggle teacher vs LoRA
+        def _enable_teacher():
+            self.zero123plus.unet.set_attn_processor(self.vsd.base_attn_procs)
+
+        def _enable_lora():
+            self.zero123plus.unet.set_attn_processor(self.vsd.lora_attn_procs)
+
+        self.vsd.enable_teacher = _enable_teacher
+        self.vsd.enable_lora    = _enable_lora
+
+        # a simple timestep weight; paper often uses ω(t)=σ_t^2
+        self.vsd.omega = lambda t_idx, alphas_cumprod: (1. - alphas_cumprod[t_idx]).view(1,1,1,1)
+        self.vsd.cfg_scale = 7.5  # VSD is CFG-friendly; do NOT use 100 like SDS
+
+        
+                
        
     def create_face_view_map(self, face_idx):
         num_views, _, H, W = face_idx.shape  # Assume face_idx shape is (B, 1, H, W)
@@ -279,27 +363,6 @@ class ConTEXTure:
         # Shape is Nx4 where N is the number of pixels (no greater than H*W*num_views = 1200*1200*7) that projects the
         # valid face ID.
         return combined_tensor_for_face_view_map[faces_idx_valid_mask]
-    # You can place this helper function inside your ConTEXTure class
-    def visualize_gradients(self, model_name: str, parameter: torch.Tensor, iteration: int):
-        if iteration % 100 == 0 and parameter.grad is not None: # Log every 100 iterations
-            grad_data = parameter.grad.cpu().numpy()
-            
-            # Squeeze dimensions for visualization if needed (e.g., for bias terms)
-            if grad_data.ndim > 2:
-                grad_data = grad_data.mean(axis=tuple(range(grad_data.ndim - 2)))
-            
-            plt.figure(figsize=(8, 6))
-            plt.title(f"Gradient Heatmap: {model_name} (Iter {iteration})")
-            img = plt.imshow(grad_data, cmap='viridis', aspect='auto')
-            plt.colorbar(img)
-            
-            # Make sure the directory exists
-            viz_path = self.train_renders_path / "grad_viz"
-            viz_path.mkdir(exist_ok=True)
-            
-            plt.savefig(viz_path / f"{model_name}_iter_{iteration:04d}.png")
-            plt.close()
-
 
     def compare_face_normals_between_views(self,face_view_map, face_normals, face_idx):
         num_views, _, H, W = face_idx.shape
@@ -390,70 +453,19 @@ class ConTEXTure:
             torch_dtype=torch.float16
         )
 
-        #MJ: The SDS training loop does NOT use the scheduler; so it is not relevant to define the scheduler for the SDS
         pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
 
         pipeline.add_controlnet(ControlNetModel.from_pretrained(
             "sudo-ai/controlnet-zp11-depth-v1", torch_dtype=torch.float16
         ), conditioning_scale=2)
 
-        # pipeline._callback_tensor_inputs += ["noise_pred"]
+
+        pipeline._callback_tensor_inputs += ["noise_pred"]
 
         pipeline.prepare()
         pipeline.to(self.device)
 
-        if self.prolificdreamer:
-            import copy
-            from peft import LoraConfig
-
-            _unet = copy.deepcopy(pipeline.unet)  #MJ: Check if _unet refers to the zero123++ which uses v_parameterization
-            _unet.requires_grad_(False)
-
-            device = self.device
-
-            unet_lora_config = LoraConfig(
-                r=32,  # Rank
-                lora_alpha=32,
-                init_lora_weights="gaussian",
-                target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-            )
-            _unet.add_adapter(unet_lora_config)
-            cast_training_params(_unet, dtype=torch.float32)
-
-            # text_input = self.guidance.tokenizer("", padding='max_length', max_length=self.guidance.tokenizer.model_max_length, truncation=True, return_tensors='pt')
-            # with torch.no_grad():
-            #     text_embeddings = self.guidance.text_encoder(text_input.input_ids.to(self.guidance.device))[0]
-            
-            class LoraUnet(torch.nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.unet = _unet
-                    self.sample_size = 64
-                    self.in_channels = 4
-                    self.device = device
-                    self.dtype = torch.float32
-                    # self.text_embeddings = text_embeddings
-
-                def forward(self, *args, **kwargs):
-                    # textemb = einops.repeat(self.text_embeddings, '1 L D -> B L D', B=x.shape[0]).to(device)
-                    return self.unet(*args, **kwargs)
-
-            self.lora_unet = LoraUnet().to(device)
-
-            logger.info("--- Verifying Trainable Parameters ---")
-
-            print("\n--- Trainable Parameters in texture_mlp (for mlp_optimizer) ---")
-            for name, param in self.mesh_model.texture_mlp.named_parameters():
-                if param.requires_grad:
-                    print(f"{name} | {param.shape}")
-
-            print("\n--- Trainable Parameters in lora_unet (for lora_optimizer) ---")
-            for name, param in self.lora_unet.named_parameters():
-                if param.requires_grad:
-                    print(f"{name} | {param.shape}")
-            print("\n" + "-"*40 + "\n")
-
-        pipeline.inpaint_unet = self.diffusion.inpaint_unet
+        pipeline.inpaint_unet = self.diffusion.inpaint_unet #MJ: self.diffusion=StableDiffusion()
 
         return pipeline
 
@@ -763,44 +775,8 @@ class ConTEXTure:
 
         # Setup SDS loop
         logger.info("Setting up SDS optimization loop...")
-        
-        
-        if not self.prolificdreamer:
-            mlp_optimizer = Adan(
-                self.mesh_model.get_params_texture_atlas(), #MJ: I think you need to update this function, because self.mesh_model.texture_mlp is modified by MJ
-                lr=5e-4,
-                eps=1e-18,
-                weight_decay=2e-5,
-                max_grad_norm=5.0,
-                foreach=False
-            )
-            
-        else: #MJ: Define mlp_optimizer for the 3  particles
-            param_groups = [ {"params": self.mesh_model.texture_mlp.parameters() }] 
-            mlp_optimizer = Adan(
-                param_groups,
-                lr=5e-4,
-                eps=1e-18,
-                weight_decay=2e-5,
-                max_grad_norm=5.0,
-                foreach=False
-            ) 
-           #MJ: PyTorch treats each dict as a parameter group. All groups share the same optimizer object opt.
-           #mlp_optimizer.step() will optimizer.step() walks through all parameter groups and applies updates independently to each group’s parameters,
-           # but only if they have non-zero gradients.
-           #   
-        if self.prolificdreamer:
-            params = [
-                {'params': self.lora_unet.parameters()}
-            ] 
-
-            lora_optimizer = torch.optim.AdamW(
-                params, 
-                lr=5e-4, 
-                betas=(0.9, 0.99),
-                eps=1e-15
-            )
-
+        # optimizer = torch.optim.Adam(self.mesh_model.get_params_texture_atlas(), lr=1e-4, betas=(0.9, 0.99), eps=1e-15)
+        optimizer = Adan(self.mesh_model.get_params_texture_atlas(), lr=5e-4, eps=1e-18, weight_decay=2e-5, max_grad_norm=5.0, foreach=False)
         scheduler = self.zero123plus.scheduler
         unet = self.zero123plus.unet
         vae = self.zero123plus.vae
@@ -867,12 +843,7 @@ class ConTEXTure:
         with tqdm(range(iterations), desc='SDS Texture Optimization') as pbar:
             for i in pbar:
                 # Sample a random timestep for each iteration
-
                 timestep_scheme = "prolificdreamer"
-
-                if self.prolificdreamer:
-                    timestep_scheme = "prolificdreamer"
-
                 assert timestep_scheme in ["basic_annealing", "random", "dreamtime", "linear_decrease", "prolificdreamer"]
 
                 if timestep_scheme == "basic_annealing":
@@ -901,7 +872,7 @@ class ConTEXTure:
                     progress = min(i / iterations, 1.0)
                     t = torch.tensor([int((iterations - 1) * (1 - progress))], device=self.device)
                 elif timestep_scheme == "prolificdreamer":
-                    anneal_point = 125
+                    anneal_point = 200
                     if i < anneal_point:
                         min_step_percent = 0.02
                         max_step_percent = 0.98
@@ -913,18 +884,7 @@ class ConTEXTure:
                     t_max = int(max_step_percent * num_timesteps)
                     t = torch.randint(t_min, t_max, (1,), device=self.device).long()
 
-               #MJ: When you call loss.backward(), PyTorch traverses the computation graph and computes gradients of all tensors with requires_grad=True.
-               # These gradients are added (accumulated) into each parameter’s .grad field. In this code, we do not want this default behavior:
-               # So call mlp_optimizer.zero_grad():
-               
-                if self.prolificdreamer:
-                    #MJ: Choose the particle randomly .
-                    self.mesh_model.texture_mlp.set_idx() 
-                    
-                    mlp_optimizer.zero_grad()
-                    lora_optimizer.zero_grad()
-                else:
-                    mlp_optimizer.zero_grad()
+                optimizer.zero_grad()
 
                 # --- Render Student and Prepare Latents ---
                 outputs = self.mesh_model.render(render_cache=render_cache, background=background_gray)
@@ -953,90 +913,76 @@ class ConTEXTure:
                     torch.cat((cropped_renders_small_list[2], cropped_renders_small_list[5]), dim=3),
                 ), dim=2) #MJ: The final tensor rendered_grid_clean will have a shape corresponding to a single image that contains a 3x2 grid of the original images
 
-                rendered_grid_clean = rendered_grid_clean * 2 - 1  #MJ:   rendered_grid_clean = x0 = g(theta)
+                rendered_grid_clean = rendered_grid_clean * 2 - 1
                 rendered_grid_clean = scale_image(rendered_grid_clean)
 
-                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample() #MJ: z0 = vae.encode(x0=g(theta)) 
+                latents_clean = vae.encode(rendered_grid_clean.to(vae.dtype)).latent_dist.sample() #MJ: z0 = latents_clean
                 latents_clean = latents_clean * vae.config.scaling_factor
 
                 scaled_latents_clean = scale_latents(latents_clean)
 
-                # JA: Calculate SDS loss gradient
-                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
-                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
-
-                #MJ: with torch.no_grad():
-                #It temporarily sets all NEWLY  created tensors to have requires_grad=False (unless you explicitly override)
-                
-                noise = torch.randn_like(scaled_latents_clean)
-                    # sigma = sigmas[t.cpu().long()]
-
-                # JA: Forward diffusion: z_t = sqrt(α_t) * xz0 + sqrt(1 - α_t) * ε
-                latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(-1))
-                #MJ: latents_noisy=z_t: latents_noisy.grad=False, but it would cause no problem, because dz_t/dz_0 is computed by other means and
-                # incoporated into grad below
-                
-                latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
-
-                #MJ: We have parallel  batches for the unet, one for the uncond prompt and the other for the cond promt;
-                # So, provide 
-                latent_model_input = torch.cat([latents_noisy] * 2) # JA: latents_noisy is the x_t obtained from the rendered image x_0
-                latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-                latent_model_input = latent_model_input.half()
+                # alpha_cumprod_t = alphas_cumprod[t.cpu().long()].to(scaled_latents_clean.device)
+                # sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t).reshape(1, 1, 1, 1)
+                # sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1. - alpha_cumprod_t).reshape(1, 1, 1, 1)
 
                 with torch.no_grad():
-                    noisy_v_pred = unet(
+                    noise = torch.randn_like(scaled_latents_clean)
+                    # sigma = sigmas[t.cpu().long()]
+
+                    # JA: Forward diffusion: x_t = sqrt(α_t) * x_0 + sqrt(1 - α_t) * ε
+                    latents_noisy = scheduler.add_noise(scaled_latents_clean, noise, t.unsqueeze(-1))
+                    latents_noisy = latents_noisy.half() #MJ: zero123++ is trained using latents with half precision
+
+                    #MJ: We have two rows in the batch input for the unet, one for the uncond prompt and the other for the cond promt;
+                    # So, provide the parallel rows of the noisy images at  time t
+                    latent_model_input = torch.cat([latents_noisy] * 2) 
+                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = latent_model_input.half()
+
+                    v_pred = unet(
                         latent_model_input, t,
                         encoder_hidden_states=encoder_hidden_states,
                         cross_attention_kwargs=dict(cond_lat=clean_cond_lat, control_depth=depth_tensor),
                         return_dict=False,
                     )[0]
 
-                # Perform guidance
-                noisy_v_pred_uncond, noisy_v_pred_text = noisy_v_pred.chunk(2) # v_pred = (B * 2, 4, H // 8, W // 8)
+                    # Perform guidance: MJ: We have two rows in the batch output of the unet, one for the uncond prompt and the other for the cond promt;
+                    
+                    v_pred_uncond, v_pred_text = v_pred.chunk(2)
 
-                if self.prolificdreamer:
-                    # JA: ProlificDreamer allows us to use CFG with low guidance scales in the training of the NeRF model
-                    guidance_scale = 4
-                    noisy_v_pred = noisy_v_pred_uncond + guidance_scale * (noisy_v_pred_text - noisy_v_pred_uncond)
+                    # guidance_scale = 4
+                    # v_pred = v_pred_uncond + guidance_scale * (v_pred_text - v_pred_uncond)
+                    # alpha_t = alphas_cumprod[t].to(self.device).reshape(-1, 1, 1, 1)
+                    # sigma_t = (1 - alpha_t).sqrt()
+                    # z0_pred_uncond = latents_noisy * alpha_t.sqrt() - v_pred_uncond * sigma_t
+                    # z0_pred_cond = latents_noisy * alpha_t.sqrt() - v_pred_text * sigma_t
 
-                    noisy_v_pred_q = self.lora_unet(
-                        latents_noisy, t,
-                        encoder_hidden_states=cond_encoder_hidden_states,
-                        cross_attention_kwargs=dict(cond_lat=cond_lat, control_depth=depth_tensor),
-                        return_dict=False,
-                    )[0]
-
-                    # noisy_v_pred_q = sqrt_alphas_cumprod * noisy_v_pred_q + sqrt_one_minus_alphas_cumprod * latents_noisy
-                else:
-                    noisy_v_pred = adaptive_projected_guidance(
-                        pred_cond=noisy_v_pred_text,
-                        pred_uncond=noisy_v_pred_uncond,
+                    v_pred = adaptive_projected_guidance(
+                        pred_cond=v_pred_text,
+                        pred_uncond=v_pred_uncond,
                         guidance_scale=500.0,
                         # momentum_buffer=momentum_buffer
                     )
-            
-                # with torch.no_grad():
-                #MJ: The denoising step is not relevant within the SDS training loop:
-                
-                    # latents = scheduler.step(noisy_v_pred, t, scaled_latents_clean, return_dict=False)[0]
-                    # latents = unscale_latents(latents).half()
-                    # image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
-                    # image = self.zero123plus.image_processor.postprocess(image, output_type="pil")[0]
-                    # image.save(f"/home/sogang/jaehoon/contexture_pipeline_test/{i}.png")
-                    
-                #End with torch.no_grad():
-                
-                noisy_v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean
-                #MJ: noisy_v = alpha_t * eps - sigma_t*z0
-                #MJ: noisy_v.grad = True; But no problem because of targets = (scaled_latents_clean - grad).float().detach() below
 
+                # with torch.no_grad():
+                # #MJ: Using step() to denoise the latent image in this loop does not make sense, because t is randomly selected
+                # in the for loop
+                    latents = scheduler.step(v_pred, t, scaled_latents_clean, return_dict=False)[0]
+                    latents = unscale_latents(latents).half() #MJ: Why use .half() here
+                    image = unscale_image(vae.decode(latents / vae.config.scaling_factor, return_dict=False)[0])
+                    image = self.zero123plus.image_processor.postprocess(image, output_type="pil")[0]
+                    image.save(f"/home/sogang/jaehoon/contexture_pipeline_test/{i}.png")
+
+                # JA: Calculate SDS loss gradient
+                sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
+                sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod[t.cpu().long()]).to(self.device).reshape(-1, 1, 1, 1)
                 
+                v = sqrt_alphas_cumprod * noise - sqrt_one_minus_alphas_cumprod * scaled_latents_clean #MJ: v = alpha_t * eps - sigma_t*z0
+
                 with torch.no_grad():
                     #MJ: with torch.no_grad():
-                    #It temporarily sets all NEWLY  created tensors to have requires_grad=False (unless you explicitly override).
-                    # => That means no computational graph is built for the operations inside the block
-                    
+                    # Disables Gradient Tracking: When you enter the with torch.no_grad(): block, 
+                    # PyTorch stops building the computational graph. It doesn't track the history of operations. 
                     # This means that when you later call loss.backward(), the gradients won't be calculated for any tensors,
                     # e.g., fisher_divergence_t,  created inside the no_grad block.
                     
@@ -1048,7 +994,7 @@ class ConTEXTure:
                     alpha_t = sqrt_alphas_cumprod.clamp(min=1e-8)
 
                     # divergence_at_t = torch.sum(((v_pred.detach() - v.detach()) / (alpha_t * sigma_t)) ** 2)
-                    fisher_divergence_t = torch.sum((alpha_t / sigma_t) ** 2 * torch.abs(noisy_v_pred - noisy_v) ** 2)
+                    fisher_divergence_t = torch.sum((alpha_t / sigma_t) ** 2 * torch.abs(v_pred - v) ** 2)
 
                     # Update the running average (Exponential Moving Average)
                     if ikl_running_avg is None:
@@ -1056,53 +1002,38 @@ class ConTEXTure:
                     else:
                         beta = 0.99  # Smoothing factor
                         ikl_running_avg = beta * ikl_running_avg + (1 - beta) * fisher_divergence_t.item()
-                #End with torch.no_grad:
 
-                lora_loss = F.mse_loss(noisy_v_pred_q, noisy_v_pred.detach())
-                
                 grad_scale = 1
                 w = (1 - alphas_cumprod[t.cpu().long()])
 
                 # JA: The original formula for the grad is as follows:
                 # grad = grad_scale * w[:, None, None, None] * sqrt_alphas_cumprod * (v_pred - v)
-                #MJ: eps_pred = c1*v_pred + c2 * z_t; eps = c1*v^{star} + c2*z_t, where c1=sqrt_alphas_cumprod ,
-                # c2= sqrt(1-alphas_cumprod) => eps_pred - eps = c1*(v_pred - v^{star}),
-                # where v^{star} is the true target= c1*eps - c2*z0,  given (z0, eps)
-
-                # JA: We detach this whole term because it's the gradient we want to apply, not a loss to minimize directly
-                with torch.no_grad():
-                    if self.prolificdreamer:
-                        grad = grad_scale * sqrt_alphas_cumprod * (noisy_v_pred - noisy_v_pred_q)
-                    else:
-                        grad = grad_scale * sqrt_alphas_cumprod * (noisy_v_pred - noisy_v)
-                        #MJ: #MJ: noisy_v.grad = True?
+                grad = sqrt_alphas_cumprod * (v_pred - v)
+                # grad = grad_scale * w[:, None, None, None] * (v_pred - v_target)  #MJ: (eps_pred - eps): score_t = - eps/sigma_t; score_t = -xt - alpha_t/sigma_t *v_hat(xt,t)
+                #MJ: grad = grad_scale * w[:, None, None, None] * (v_pred - v) #: eps_pred-  eps = alpha_t * (v_pred -v)
+                # grad = torch.nan_to_num(grad)
 
                 # 2. Define the target gradient
                 targets = (scaled_latents_clean - grad).float().detach()
 
-                #MJ: .detach():
-                    # z = y.detach()
-                    # z shares the same storage as y, but no longer has a grad_fn.
-                    # Graph for z stops there. Backprop through z won’t reach x.
-                    # But note: y is still connected to x. If you backprop through y or loss = y**2, the original x is still updated.
-               
-                # 3. Calculate the MSE loss: dloss/dtheta
-                sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
-                    scaled_latents_clean.float(),
-                    targets,
-                    reduction='mean'
-                )
-                # MJ: omitted: / scaled_latents_clean.shape[0]; reduction= "mean" already computes the average.
+                scaled_latents_split = split_3x2_grid_to_tensor_with_6_elements(scaled_latents_clean, tile_size=40)
+                targets_split = split_3x2_grid_to_tensor_with_6_elements(targets, tile_size=40)
 
-                #MJ: The equiv to the above is:
-                # grad is a constant (detached)
-                    # v = grad.detach()
-                    # L_theta = (v * scaled_latents_clean).mean()
-                    # # => dL/dx = v
+                # 3. Calculate the MSE loss: dloss/dtheta: 
+                # #MJ: Using the loss for each view image and combining helps?
+                sds_loss = 0.5 * F.mse_loss( # [B, C, 120, 80]
+                    # scaled_latents_clean[:, :, :40, :40].float(), #MJ: z0 = scaled_latents_clean
+                    # targets[:, :, :40, :40],                       #MJ: [z0 * (z0 - grad)]^2 => dloss/dtheta = (eps_pred- eps)*dz0/dtheta
+                    # scaled_latents_clean.float(),
+                    # targets,
+                    scaled_latents_split.float(),
+                    targets_split,
+                    reduction='mean'
+                ) / scaled_latents_clean.shape[0]
 
                 tv_loss = 0
-                # if i > iterations * 0.25:
-                    # tv_loss += self.total_variation_loss(self.mesh_model.get_texture_map()[0]) * 0.1
+                # if i > 200:
+                #     tv_loss += self.total_variation_loss(self.mesh_model.get_texture_map()[0]) * 0.005
 
                 consistency_reward = 0#self.compute_view_consistency(
                 #     rendered_six_views_clean,
@@ -1111,59 +1042,15 @@ class ConTEXTure:
                 #     render_cache['face_vertices_image'][1:]
                 # )
 
-                loss = sds_loss + tv_loss + lora_loss  #- 500 * consistency_reward
-                # graph = make_dot(loss, params=dict(self.lora_unet.named_parameters()))
-
+                loss = sds_loss + tv_loss  #- 500 * consistency_reward
                 # print(f"SDS: {sds_loss:.2f}, VC: {vc_loss:.2f}")
 
                 loss.backward()
-                mlp_param_to_watch = list(self.mesh_model.texture_mlp.parameters())[-2]
-                self.visualize_gradients("MLP_Final_Layer", mlp_param_to_watch, i)
-
-                lora_param_to_watch = [p for p in self.lora_unet.parameters() if p.requires_grad][0]
-                self.visualize_gradients("LoRA_First_Layer", lora_param_to_watch, i)
-
                 # torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
 
-                # =========================================================================
-                # <<< START DEBUGGING BLOCK: CHECK WEIGHT UPDATES >>>
-                # =========================================================================
-
-                # --- 1. Check MLP (Texture Generator) Weights ---
-                mlp_weight_before = None
-                # Create a list of ONLY the trainable parameters
-                trainable_mlp_params = [p for p in self.mesh_model.texture_mlp.parameters() if p.requires_grad]
-                if trainable_mlp_params:
-                    # Select the first one from the guaranteed-to-be-trainable list
-                    mlp_param_to_watch = trainable_mlp_params[0]
-                    mlp_weight_before = mlp_param_to_watch.clone().detach()
-                else:
-                    # This would be a major problem, but our check will catch it
-                    print("CRITICAL DEBUG: No trainable NeRF parameters were found!")
-
-                # --- 2. Check LoRA (Diffusion UNet) Weights (only if prolificdreamer is active) ---
-                lora_weight_before = None
-                if self.prolificdreamer:
-                    # Create a list of ONLY the trainable parameters
-                    trainable_lora_params = [p for p in self.lora_unet.parameters() if p.requires_grad]
-                    if trainable_lora_params:
-                        # Select the first one from the guaranteed-to-be-trainable list
-                        lora_param_to_watch = trainable_lora_params[0]
-                        lora_weight_before = lora_param_to_watch.clone().detach()
-                    else:
-                        # This would be a major problem, but our check will catch it
-                        print("CRITICAL DEBUG: No trainable LoRA parameters were found!")
-
-                # Collect all gradients into a list of flat 1D tensors
-                grads = [p.grad.view(-1) for p in self.mesh_model.texture_mlp.parameters() if p.grad is not None]
-
-                # Concatenate into one big vector
-                if grads:
-                    grad_vector = torch.cat(grads)
-                else:
-                    grad_vector = torch.tensor(0.0, device=self.device)
-
-
+                grad_vector = torch.nn.utils.parameters_to_vector(
+                    p.grad for p in self.mesh_model.texture_mlp.parameters() if p.grad is not None
+                )
 
                 grad_norm = torch.linalg.norm(grad_vector)
 
@@ -1193,40 +1080,7 @@ class ConTEXTure:
                         logger.info(f"Gradient Norm of Final Layer: {grad_norm}")
                         logger.info(f"---------------------------------")
 
-                mlp_optimizer.step()
-                #MJ: optimizer.step() walks through all parameter groups and applies updates independently to each group’s parameters, but only if they have non-zero gradients.
-                
-                if self.prolificdreamer:
-                    lora_optimizer.step()
-
-                # --- 3. Compare MLP weights AFTER the step ---
-                if mlp_weight_before is not None:
-                    mlp_weight_after = mlp_param_to_watch.detach()
-                    mlp_updated = not torch.equal(mlp_weight_before, mlp_weight_after)
-                    print(f"--- Iteration {i} ---")
-                    print(f"MLP Weights Updated: {mlp_updated}")
-                    if not mlp_updated and mlp_param_to_watch.grad is not None:
-                        print(f"  -> MLP grad norm: {torch.linalg.norm(mlp_param_to_watch.grad).item()}")
-                    elif not mlp_updated:
-                        print(f"  -> MLP grad is None!")
-
-
-                # --- 4. Compare LoRA weights AFTER the step ---
-                if self.prolificdreamer and lora_weight_before is not None:
-                    lora_weight_after = lora_param_to_watch.detach()
-                    lora_updated = not torch.equal(lora_weight_before, lora_weight_after)
-                    print(f"LoRA Weights Updated: {lora_updated}")
-                    if not lora_updated and lora_param_to_watch.grad is not None:
-                        print(f"  -> LoRA grad norm: {torch.linalg.norm(lora_param_to_watch.grad).item()}")
-                    elif not lora_updated:
-                        print(f"  -> LoRA grad is None!")
-                    print(f"---------------------")
-
-
-                # =========================================================================
-                # <<< END DEBUGGING BLOCK >>>
-                # =========================================================================
-
+                optimizer.step()
 
                 if (i % 10 == 0 and i < 1000) or (i % 100 == 0):
                     self.log_texture_map(i)

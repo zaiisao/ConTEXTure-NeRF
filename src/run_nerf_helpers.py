@@ -160,39 +160,88 @@ class NeRF2D(nn.Module):
 
 import random
 
+ #MJ: The network structure for multiple exture_mlp is entangled; See my modification below
+
+# class NeRF2DNetwork(nn.Module):
+#     def __init__(self, n_particles, **mlp_kwargs):
+#         super().__init__()
+
+#         self.mlps = []
+#         self.encoders = []
+
+#         self.n_particles = n_particles
+#         self.idx = None
+      
+#         for _ in range(self.n_particles):
+#             encoder, output_dim = get_grid_encoder()
+
+#             self.encoders.append(encoder)
+#             self.mlps.append(NeRF2D(input_ch=output_dim, **mlp_kwargs))
+
+#         self.mlps = nn.ModuleList(self.mlps)
+#         self.encoders = nn.ModuleList(self.encoders)       
+
+#         self.set_idx()
+
+#     def set_idx(self, idx=None): #MJ: You are supposed to call set_idx() every iteration in VSD training loop
+#         if idx == None:
+#             self.idx = random.randint(0, self.n_particles-1)
+#         else:
+#             self.idx = idx
+
+#     def forward(self, x, use_encoder=True):
+#         if use_encoder:
+#             encoded_uvs = self.encoders[self.idx](x)
+#             return self.mlps[self.idx](encoded_uvs)
+
+#         return self.mlps[self.idx](x)
+#Moon's Version:
+
+# --- 0. NEW: Define a single module representing one particle (theta^(i)) ---
+class ParticleModule(nn.Module):
+    """Encapsulates the Encoder and MLP for a single 3D structure (theta^(i))."""
+    def __init__(self, encoder, mlp):
+        super().__init__()
+        # These are registered as sub-modules
+        self.encoder = encoder
+        self.mlp = mlp
+        
+    def forward(self, x, use_encoder=True):
+        # Forward pass logic
+        if use_encoder:
+            encoded_uvs = self.encoder(x)
+            return self.mlp(encoded_uvs)
+        return self.mlp(x)
+    
 class NeRF2DNetwork(nn.Module):
     def __init__(self, n_particles, **mlp_kwargs):
         super().__init__()
-
-        self.mlps = []
-        self.encoders = []
-
         self.n_particles = n_particles
-        self.idx = None
-
+        # In a real setup, these would be proper Encoder/MLP instances
+        # using nn.ModuleList to hold the particles is critical for parameter registration
+        
+        particle_modules = []
         for _ in range(self.n_particles):
             encoder, output_dim = get_grid_encoder()
+            mlp = NeRF2D(input_ch=output_dim, **mlp_kwargs)
+            particle_module = ParticleModule(encoder, mlp)
+            particle_modules.append(particle_module)
 
-            self.encoders.append(encoder)
-            self.mlps.append(NeRF2D(input_ch=output_dim, **mlp_kwargs))
-
-        self.mlps = nn.ModuleList(self.mlps)
-        self.encoders = nn.ModuleList(self.encoders)
-
-        self.set_idx()
-
+        self.particles = nn.ModuleList(particle_modules)
+        self.idx = 0
+        
     def set_idx(self, idx=None):
-        if idx == None:
-            self.idx = random.randint(0, self.n_particles-1)
+        """Allows sampling a particle index for VSD update."""
+        if idx is None:
+            self.idx = random.randint(0, self.n_particles - 1)
         else:
             self.idx = idx
-
-    def forward(self, x, use_encoder=True):
-        if use_encoder:
-            encoded_uvs = self.encoders[self.idx](x)
-            return self.mlps[self.idx](encoded_uvs)
-
-        return self.mlps[self.idx](x)
+            
+    def forward(self, x):
+        print(self.idx)
+        # Returns output for the currently sampled particle
+        return self.particles[self.idx](x)    
+            
 
 # Ray helpers
 def get_rays(H, W, K, c2w):
