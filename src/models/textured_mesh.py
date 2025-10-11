@@ -397,7 +397,10 @@ class TexturedMeshModel(nn.Module):
         params = list(self.texture_mlp.parameters())
         
         if self.uv_embedder is not None:
-            params += list(self.uv_embedder.parameters())
+            params += list({
+                "params": self.uv_embedder.parameters(),
+                "lr": 1e-2,
+            })
 
         return params
 

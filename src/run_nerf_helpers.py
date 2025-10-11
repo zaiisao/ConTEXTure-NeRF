@@ -71,7 +71,7 @@ from src.models.gridencoder import GridEncoder
 def get_grid_encoder(input_dim=2, 
                 multires=8, 
                 degree=4,
-                num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=14, desired_resolution=2048, align_corners=False,
+                num_levels=64, level_dim=2, base_resolution=16, log2_hashmap_size=22, desired_resolution=1024, align_corners=True,
                 **kwargs):
 
     encoder = GridEncoder(
@@ -210,8 +210,12 @@ class ParticleModule(nn.Module):
         # Forward pass logic
         if use_encoder:
             encoded_uvs = self.encoder(x)
-            return self.mlp(encoded_uvs)
-        return self.mlp(x)
+            result = self.mlp(encoded_uvs)
+        else:
+            result = self.mlp(x)
+
+        # print(result.min(), result.max())
+        return result
     
 class NeRF2DNetwork(nn.Module):
     def __init__(self, n_particles, **mlp_kwargs):
@@ -223,7 +227,9 @@ class NeRF2DNetwork(nn.Module):
         particle_modules = []
         for _ in range(self.n_particles):
             encoder, output_dim = get_grid_encoder()
-            mlp = NeRF2D(input_ch=output_dim, **mlp_kwargs)
+            # mlp = NeRF2D(input_ch=output_dim, **mlp_kwargs)
+            mlp = nn.Linear(output_dim, 3)
+            nn.init.kaiming_normal_(mlp.weight, mode='fan_in', nonlinearity='relu')
             particle_module = ParticleModule(encoder, mlp)
             particle_modules.append(particle_module)
 
@@ -238,7 +244,6 @@ class NeRF2DNetwork(nn.Module):
             self.idx = idx
             
     def forward(self, x):
-        print(self.idx)
         # Returns output for the currently sampled particle
         return self.particles[self.idx](x)    
             

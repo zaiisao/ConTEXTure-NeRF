@@ -193,7 +193,7 @@ class ConTEXTure:
         if self.prolificdreamer:
             self.uv_embedder = None
             
-            self.texture_mlp = NeRF2DNetwork(n_particles=3, **mlp_args)
+            self.texture_mlp = NeRF2DNetwork(n_particles=1, **mlp_args)
         else:
             # self.uv_embedder, input_ch_uv = get_embedder(multires=8) #MJ: input_ch_uv = the dim of the Fourier embedding vector of (u,v), say 60
             self.uv_embedder, output_dim = get_grid_encoder()
@@ -299,6 +299,50 @@ class ConTEXTure:
             
             plt.savefig(viz_path / f"{model_name}_iter_{iteration:04d}.png")
             plt.close()
+
+    def log_lora_output(self, vae, scheduler, noisy_latents, v_prediction, t, iteration):
+        """Decodes the LoRA UNet's v-prediction into an image and saves it."""
+        if iteration % 10 != 0: # Only run this periodically
+            return
+            
+        with torch.no_grad():
+            # Use the scheduler to step backwards and get the predicted clean latents
+            pred_original_sample = scheduler.step(v_prediction, t, noisy_latents).pred_original_sample
+
+            # Unscale the latents using your custom function
+            latents_unscaled = unscale_latents(pred_original_sample)
+
+            # Decode the latents with the VAE
+            latents_for_vae = latents_unscaled / vae.config.scaling_factor
+            decoded_image = vae.decode(latents_for_vae.half(), return_dict=False)[0]
+
+            # Unscale the image from the custom function and normalize from [-1, 1] to [0, 1]
+            image_unscaled = unscale_image(decoded_image)
+            image_normalized = (image_unscaled.clamp(-1, 1) + 1) / 2
+
+            # Save the image using your existing logger
+            self.log_train_image(image_normalized, f'lora_output_iter_{iteration:06d}')
+
+    def log_teacher_guidance(self, vae, scheduler, noisy_latents, v_prediction, t, iteration):
+        """Decodes the frozen UNet's v-prediction to visualize the guidance signal."""
+        if iteration % 10 != 0: # Only run this periodically
+            return
+            
+        with torch.no_grad():
+            # Use the scheduler to get the predicted clean latents from the teacher's guidance
+            pred_original_sample = scheduler.step(v_prediction, t, noisy_latents).pred_original_sample
+
+            # Unscale the latents
+            latents_unscaled = unscale_latents(pred_original_sample)
+            latents_for_vae = latents_unscaled / vae.config.scaling_factor
+            
+            # Decode into an image
+            decoded_image = vae.decode(latents_for_vae.half(), return_dict=False)[0]
+
+            # Normalize and save
+            image_unscaled = unscale_image(decoded_image)
+            image_normalized = (image_unscaled.clamp(-1, 1) + 1) / 2
+            self.log_train_image(image_normalized, f'teacher_guidance_iter_{iteration:06d}')
 
 
     def compare_face_normals_between_views(self,face_view_map, face_normals, face_idx):
@@ -766,8 +810,13 @@ class ConTEXTure:
         
         
         if not self.prolificdreamer:
+            param_groups = [
+                {"params": self.uv_embedder.parameters(), "lr": 1e-2},
+                {"params": self.texture_mlp.parameters(), "lr": 5e-4}
+            ]
+
             mlp_optimizer = Adan(
-                self.mesh_model.get_params_texture_atlas(), #MJ: I think you need to update this function, because self.mesh_model.texture_mlp is modified by MJ
+                param_groups,
                 lr=5e-4,
                 eps=1e-18,
                 weight_decay=2e-5,
@@ -776,7 +825,15 @@ class ConTEXTure:
             )
             
         else: #MJ: Define mlp_optimizer for the 3  particles
-            param_groups = [ {"params": self.mesh_model.texture_mlp.parameters() }] 
+            param_groups = [
+                # {"params": self.mesh_model.texture_mlp.parameters()},
+            ] 
+
+            for particle in self.mesh_model.texture_mlp.particles:
+                param_groups.append({"params": particle.encoder.parameters(), "lr": 1e-3})
+                param_groups.append({"params": particle.mlp.parameters(), "lr": 1e-3})
+
+
             mlp_optimizer = Adan(
                 param_groups,
                 lr=5e-4,
@@ -796,7 +853,7 @@ class ConTEXTure:
 
             lora_optimizer = torch.optim.AdamW(
                 params, 
-                lr=5e-4, 
+                lr=1e-4, 
                 betas=(0.9, 0.99),
                 eps=1e-15
             )
@@ -853,7 +910,7 @@ class ConTEXTure:
 
         alphas_cumprod = scheduler.alphas_cumprod.to(self.device)
 
-        iterations = 500
+        iterations = 201
         ikl_running_avg = None
 
         import wandb
@@ -901,7 +958,7 @@ class ConTEXTure:
                     progress = min(i / iterations, 1.0)
                     t = torch.tensor([int((iterations - 1) * (1 - progress))], device=self.device)
                 elif timestep_scheme == "prolificdreamer":
-                    anneal_point = 125
+                    anneal_point = 1000
                     if i < anneal_point:
                         min_step_percent = 0.02
                         max_step_percent = 0.98
@@ -995,10 +1052,23 @@ class ConTEXTure:
                 # Perform guidance
                 noisy_v_pred_uncond, noisy_v_pred_text = noisy_v_pred.chunk(2) # v_pred = (B * 2, 4, H // 8, W // 8)
 
-                if self.prolificdreamer:
-                    # JA: ProlificDreamer allows us to use CFG with low guidance scales in the training of the NeRF model
+                use_cfg = True
+
+                if use_cfg:
                     guidance_scale = 4
                     noisy_v_pred = noisy_v_pred_uncond + guidance_scale * (noisy_v_pred_text - noisy_v_pred_uncond)
+                else:
+                    noisy_v_pred = adaptive_projected_guidance(
+                        pred_cond=noisy_v_pred_text,
+                        pred_uncond=noisy_v_pred_uncond,
+                        guidance_scale=500.0,
+                        # momentum_buffer=momentum_buffer
+                    )
+
+                self.log_teacher_guidance(vae, scheduler, latents_noisy, noisy_v_pred, t, i)
+
+                if self.prolificdreamer:
+                    # JA: ProlificDreamer allows us to use CFG with low guidance scales in the training of the NeRF model
 
                     noisy_v_pred_q = self.lora_unet(
                         latents_noisy, t,
@@ -1007,14 +1077,9 @@ class ConTEXTure:
                         return_dict=False,
                     )[0]
 
+                    self.log_lora_output(vae, scheduler, latents_noisy, noisy_v_pred_q, t, i)
+
                     # noisy_v_pred_q = sqrt_alphas_cumprod * noisy_v_pred_q + sqrt_one_minus_alphas_cumprod * latents_noisy
-                else:
-                    noisy_v_pred = adaptive_projected_guidance(
-                        pred_cond=noisy_v_pred_text,
-                        pred_uncond=noisy_v_pred_uncond,
-                        guidance_scale=500.0,
-                        # momentum_buffer=momentum_buffer
-                    )
             
                 # with torch.no_grad():
                 #MJ: The denoising step is not relevant within the SDS training loop:
@@ -1058,9 +1123,12 @@ class ConTEXTure:
                         ikl_running_avg = beta * ikl_running_avg + (1 - beta) * fisher_divergence_t.item()
                 #End with torch.no_grad:
 
-                lora_loss = F.mse_loss(noisy_v_pred_q, noisy_v_pred.detach())
+                if self.prolificdreamer:
+                    lora_loss = F.mse_loss(noisy_v_pred_q, noisy_v_pred.detach())
+                else:
+                    lora_loss = 0
                 
-                grad_scale = 1
+                grad_scale = 10
                 w = (1 - alphas_cumprod[t.cpu().long()])
 
                 # JA: The original formula for the grad is as follows:
@@ -1098,7 +1166,8 @@ class ConTEXTure:
                 # grad is a constant (detached)
                     # v = grad.detach()
                     # L_theta = (v * scaled_latents_clean).mean()
-                    # # => dL/dx = v
+                    # => dL/dtheta = dL/dz_t *  dz_t/dtheta = (dv/dz_t *scaled_latents_clean + v *dz0/dz_t ) * dx_t/dtheta
+                    #  = (  v *dz0/dz_t  ) * dx_t/dtheta, where dx_t/dtheta = alpha_t dx_0/dtheta
 
                 tv_loss = 0
                 # if i > iterations * 0.25:
@@ -1120,8 +1189,9 @@ class ConTEXTure:
                 mlp_param_to_watch = list(self.mesh_model.texture_mlp.parameters())[-2]
                 self.visualize_gradients("MLP_Final_Layer", mlp_param_to_watch, i)
 
-                lora_param_to_watch = [p for p in self.lora_unet.parameters() if p.requires_grad][0]
-                self.visualize_gradients("LoRA_First_Layer", lora_param_to_watch, i)
+                if self.prolificdreamer:
+                    lora_param_to_watch = [p for p in self.lora_unet.parameters() if p.requires_grad][0]
+                    self.visualize_gradients("LoRA_First_Layer", lora_param_to_watch, i)
 
                 # torch.nn.utils.clip_grad_norm_(self.mesh_model.texture_mlp.parameters(), 1.0)
 
