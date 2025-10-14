@@ -278,7 +278,8 @@ class TexturedMeshModel(nn.Module):
             # JA: If self.uv_embedder is None, we expect the embedder to be included in the MLP function
             mlp_output = self.texture_mlp(uv_coords_flat)
 
-        texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
+        # texture_colors = (mlp_output.tanh() + 1) / 2 # JA: tanh is used instead of sigmoid to reduce the vanishing gradient problem
+        texture_colors = torch.sigmoid(mlp_output)
         
         return texture_colors.reshape(1, res, res, 3).permute(0, 3, 1, 2), mlp_output
 

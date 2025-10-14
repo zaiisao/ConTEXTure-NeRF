@@ -71,18 +71,28 @@ from src.models.gridencoder import GridEncoder
 def get_grid_encoder(input_dim=2, 
                 multires=8, 
                 degree=4,
-                num_levels=64, level_dim=2, base_resolution=16, log2_hashmap_size=22, desired_resolution=1024, align_corners=True,
+                num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=6, desired_resolution=8192, align_corners=True,
+                interpolation='smoothstep',
                 **kwargs):
+
+    # The finest resolution desired at the last level, if provided, override per_level_scale
+    if desired_resolution is not None:
+        per_level_scale = np.exp2(np.log2(desired_resolution / base_resolution) / (num_levels - 1))
+    else:
+        # handle the case where desired_resolution is not provided if needed
+        per_level_scale = 2 
 
     encoder = GridEncoder(
         input_dim=input_dim,
         num_levels=num_levels,
         level_dim=level_dim,
+        per_level_scale=per_level_scale,
         base_resolution=base_resolution,
         log2_hashmap_size=log2_hashmap_size,
-        desired_resolution=desired_resolution,
+        # desired_resolution=desired_resolution,
         gridtype='hash',
-        align_corners=align_corners
+        align_corners=align_corners,
+        interpolation=interpolation
     )
 
     return encoder, encoder.output_dim
@@ -227,9 +237,9 @@ class NeRF2DNetwork(nn.Module):
         particle_modules = []
         for _ in range(self.n_particles):
             encoder, output_dim = get_grid_encoder()
-            # mlp = NeRF2D(input_ch=output_dim, **mlp_kwargs)
-            mlp = nn.Linear(output_dim, 3)
-            nn.init.kaiming_normal_(mlp.weight, mode='fan_in', nonlinearity='relu')
+            mlp = NeRF2D(input_ch=output_dim, **mlp_kwargs)
+            # mlp = nn.Linear(output_dim, 3)
+            # nn.init.kaiming_normal_(mlp.weight, mode='fan_in', nonlinearity='relu')
             particle_module = ParticleModule(encoder, mlp)
             particle_modules.append(particle_module)
 
